@@ -1,0 +1,30 @@
+{
+  "name": "bot-telegram",
+  "version": "1.0.0",
+  "description": "",
+  "main": "dist/index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "dev": "tsx src/index.ts",
+    "dev:panel": "START_PANEL=true tsx src/index.ts",
+    "panel": "node dist/panelServer.js",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "cron": "^4.3.4",
+    "dotenv": "^17.2.3",
+    "express": "^5.1.0",
+    "telegraf": "^4.16.3"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.5",
+    "@types/node": "^24.10.1",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  }
+}
