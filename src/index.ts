@@ -18,20 +18,19 @@ const bot = new Telegraf(token);
 const isPanelEnabled = process.env.START_PANEL === 'true';
 
 
-const registerBotCommands = async (botInstance: Telegraf) => {
-  await botInstance.telegram.setMyCommands([
-    { command: 'help', description: 'Pomoc i opis bota' },
-    { command: 'schedule', description: 'Zaplanuj wiadomość CRON-em' },
-    { command: 'schedule_channel', description: 'Zaplanuj wiadomość na kanał CRON-em' },
-    { command: 'list_posts', description: 'Lista zapisanych wiadomości z czatu' },
-    { command: 'list_jobs', description: 'Lista aktywnych zadań CRON' },
-    { command: 'test_post', description: 'Wyślij testowy post do ćwiczeń' },
-    { command: 'edit_post', description: 'Edytuj wiadomość po ID lub reply' },
-    { command: 'delete_post', description: 'Usuń wiadomość po ID lub reply' },
-    { command: 'channel_test', description: 'Wyślij testowy post na kanał' },
-    { command: 'cancel_job', description: 'Anuluj zadanie CRON po ID' },
-  ]);
-};
+const telegramMenuCommands = [
+  { command: 'ping', description: 'Sprawdzenie czy bot działa' },
+  { command: 'schedule', description: 'Utwórz zadanie cron w czacie' },
+  { command: 'schedule_channel', description: 'Utwórz zadanie cron na kanał' },
+  { command: 'test_post', description: 'Wyślij testowy post' },
+  { command: 'list_posts', description: 'Lista zaplanowanych postów' },
+  { command: 'list_jobs', description: 'Lista aktywnych zadań cron' },
+  { command: 'list_admins', description: 'Wyświetl listę adminów' },
+  { command: 'add_admin', description: 'Dodaj admina (reply lub ID)' },
+  { command: 'remove_admin', description: 'Usuń admina (reply lub ID)' },
+  { command: 'current_channel', description: 'Pokaż ustawiony kanał' },
+  { command: 'set_channel', description: 'Ustaw kanał (reply lub ID)' },
+];
 
 type ReplyOptions = Parameters<Context['reply']>[1];
 
@@ -322,41 +321,20 @@ const tryEditBotMessage = async (chatId: number, messageId: number, newText: str
 };
 
 const helpMessage = [
-  '📚 Pomoc bota',
-  'Bot służy do wysyłania, edytowania i kasowania postów oraz planowania wiadomości cronem.',
-  '',
   'Dostępne komendy:',
-  '/ping – test działania bota',
-  '/schedule "CRON_6_POL" Wiadomość – cykliczne wysyłanie',
-  '  Odpowiedz na wiadomość tekstową (np. draft kanału), aby skopiować jej treść i formatowanie.',
-  '  Nie wpisuj dodatkowego tekstu po cronie, gdy chcesz kopiować formatowanie.',
-  '/edit_post <message_id> <nowy_tekst> – edytuje wiadomość wysłaną przez bota',
-  '/delete_post <message_id> – usuwa wiadomość wysłaną przez bota',
-  '/test_post – wysyła testowy post do edycji/kasowania',
-  '/list_posts [limit] – pokazuje zapisane wiadomości z bieżącego czatu',
-  '/list_jobs – pokazuje aktywne zadania cron w czacie',
-  '/cancel_job <id> – zatrzymuje wskazane zadanie cron',
+  '/ping – test działania',
+  '/schedule – ustaw cron w czacie',
+  '/schedule_channel – cron na kanał',
+  '/test_post – testowy post',
+  '/list_posts – lista postów',
+  '/list_jobs – lista zadań',
   '',
-  'Wskazówki:',
-  '- Odpowiedz na wiadomość bota komendami /edit_post lub /delete_post, aby nie przepisywać ID.',
-  '- /list_posts dodaje przyciski ✏️/🗑 pod każdą wiadomością do szybkiej edycji lub usunięcia.',
-  '',
-  'Przykład użycia /schedule:',
-  '/schedule "*/10 * * * * *" Hello',
-  '',
-  'Planowanie na kanał:',
-  '/schedule_channel "*/10 * * * * *" Treść – planuj posty z tekstem lub mediami.',
-  '  Odpowiedz na wiadomość tekstową, aby zachować formatowanie (tekst komendy zostanie zignorowany).',
-  '  Odpowiedz na media, aby wysłać zdjęcie/wideo/gif (jak dotąd).',
-  '',
-  'Więcej o formacie CRON: /cron_help',
-  '',
-  'Sekcja admina:',
-  '/list_admins – lista ID administratorów zapisanych w konfiguracji.',
-  '/add_admin – dodaj administratora przez ID lub odpowiedź na wiadomość.',
-  '/remove_admin – usuń administratora przez ID lub odpowiedź na wiadomość.',
-  '/current_channel – pokaż aktualnie ustawiony kanał docelowy.',
-  '/set_channel – zapisz kanał (komenda działa z tła kanału, reply lub ID).',
+  'Komendy administratora:',
+  '/list_admins – lista adminów',
+  '/add_admin – dodaj admina (reply lub ID)',
+  '/remove_admin – usuń admina (reply lub ID)',
+  '/current_channel – aktualny kanał',
+  '/set_channel – zmień kanał',
 ].join('\n');
 
 const cronHelpMessage = [
@@ -1150,7 +1128,7 @@ const shutdown = async (signal: 'SIGINT' | 'SIGTERM') => {
 };
 
 const main = async () => {
-  await registerBotCommands(bot);
+  await bot.telegram.setMyCommands(telegramMenuCommands);
   await bot.launch();
   console.log('Bot działa.');
 
