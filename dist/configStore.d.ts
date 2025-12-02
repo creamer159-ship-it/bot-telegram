@@ -10,6 +10,7 @@ declare class ConfigStore {
     getAdminIds(): number[];
     isAdmin(id: number): boolean;
     addAdmin(id: number): boolean;
+    ensureBootstrapAdmin(id: number): boolean;
     removeAdmin(id: number): boolean;
     getMainChannelId(): number | null;
     setMainChannelId(id: number | null): void;

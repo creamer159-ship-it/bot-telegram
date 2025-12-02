@@ -46,22 +46,30 @@ const replyWithTracking = async (
   return sentMessage;
 };
 
-const isAdminCtx = (ctx: Context): boolean => {
-  const userId = ctx.from?.id;
-  return typeof userId === 'number' && configStore.isAdmin(userId);
-};
-
 const requireAdmin = async (ctx: Context): Promise<boolean> => {
   const userId = ctx.from?.id;
   if (typeof userId !== 'number') {
-    await replyWithTracking(ctx, 'Polecenie dostępne tylko w prywatnym czacie.', 'require_admin:no_user');
+    await replyWithTracking(
+      ctx,
+      'Brak kontekstu użytkownika. Ta komenda wymaga uprawnień administratora.',
+      'require_admin:no_user',
+    );
     return false;
   }
-  if (!isAdminCtx(ctx)) {
-    await replyWithTracking(ctx, 'Nie masz uprawnień administratora.', 'require_admin:denied');
-    return false;
+  if (configStore.isAdmin(userId)) {
+    return true;
   }
-  return true;
+  const became = configStore.ensureBootstrapAdmin(userId);
+  if (became) {
+    await replyWithTracking(
+      ctx,
+      'Nie było żadnych adminów, dodano Cię jako pierwszego administratora.',
+      'require_admin:bootstrap',
+    );
+    return true;
+  }
+  await replyWithTracking(ctx, 'Nie masz uprawnień administratora.', 'require_admin:denied');
+  return false;
 };
 
 const parseNumericArgument = (ctx: Context): number | null => {

@@ -45,6 +45,14 @@ class ConfigStore {
         void this.persist();
         return true;
     }
+    ensureBootstrapAdmin(id) {
+        if (this.config.adminIds.length > 0) {
+            return false;
+        }
+        this.config.adminIds.push(id);
+        void this.persist();
+        return true;
+    }
     removeAdmin(id) {
         if (!this.isAdmin(id)) {
             return false;
