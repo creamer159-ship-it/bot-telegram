@@ -42,15 +42,21 @@ const requireAdmin = async (ctx, { notify = true } = {}) => {
     if (configStore.isAdmin(userId)) {
         return true;
     }
-    const became = configStore.ensureBootstrapAdmin(userId);
-    if (became) {
-        if (notify) {
-            await replyWithTracking(ctx, 'Nie było żadnych adminów, dodano Cię jako pierwszego administratora.', 'require_admin:bootstrap');
+    const isProduction = process.env.NODE_ENV === 'production';
+    if (!isProduction) {
+        const became = configStore.ensureBootstrapAdmin(userId);
+        if (became) {
+            if (notify) {
+                await replyWithTracking(ctx, 'Nie było żadnych adminów, dodano Cię jako pierwszego administratora.', 'require_admin:bootstrap');
+            }
+            return true;
         }
-        return true;
     }
     if (notify) {
-        await replyWithTracking(ctx, 'Nie masz uprawnień administratora.', 'require_admin:denied');
+        const message = isProduction
+            ? 'Nie masz uprawnień administratora. Na produkcji admini muszą być ustawieni przez ADMIN_IDS w środowisku.'
+            : 'Nie masz uprawnień administratora.';
+        await replyWithTracking(ctx, message, 'require_admin:denied');
     }
     return false;
 };

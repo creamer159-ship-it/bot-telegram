@@ -1,5 +1,6 @@
 import { mkdir, readFile, writeFile } from 'fs/promises';
 import path from 'path';
+const isProd = process.env.NODE_ENV === 'production';
 const DATA_DIR = path.resolve(process.cwd(), 'data');
 const CONFIG_PATH = path.join(DATA_DIR, 'config.json');
 class ConfigStore {
@@ -8,6 +9,10 @@ class ConfigStore {
         this.config = config;
     }
     static async initialize() {
+        const fallback = ConfigStore.buildDefault();
+        if (isProd) {
+            return new ConfigStore(fallback);
+        }
         await mkdir(DATA_DIR, { recursive: true });
         try {
             const rawContent = await readFile(CONFIG_PATH, 'utf8');
@@ -17,7 +22,6 @@ class ConfigStore {
         }
         catch (error) {
             if (error?.code === 'ENOENT') {
-                const fallback = ConfigStore.buildDefault();
                 const store = new ConfigStore(fallback);
                 await store.persist();
                 return store;
@@ -46,7 +50,7 @@ class ConfigStore {
         return true;
     }
     ensureBootstrapAdmin(id) {
-        if (this.config.adminIds.length > 0) {
+        if (this.config.adminIds.length > 0 || isProd) {
             return false;
         }
         this.config.adminIds.push(id);
@@ -72,6 +76,10 @@ class ConfigStore {
         void this.persist();
     }
     async persist() {
+        if (isProd) {
+            console.log('persist skipped in production');
+            return;
+        }
         const payload = JSON.stringify(this.config, null, 2);
         try {
             await writeFile(CONFIG_PATH, payload, 'utf8');
