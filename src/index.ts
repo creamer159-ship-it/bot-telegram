@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import { CronJob } from 'cron';
-import { Telegraf } from 'telegraf';
+import { Markup, Telegraf } from 'telegraf';
 import type { Context } from 'telegraf';
 import type { Message as TelegramMessage, MessageEntity } from 'telegraf/types';
 import editSessionStore from './editSessionStore.js';
@@ -45,14 +45,19 @@ const replyWithTracking = async (
   return sentMessage;
 };
 
-const requireAdmin = async (ctx: Context): Promise<boolean> => {
+const requireAdmin = async (
+  ctx: Context,
+  { notify = true }: { notify?: boolean } = {},
+): Promise<boolean> => {
   const userId = ctx.from?.id;
   if (typeof userId !== 'number') {
-    await replyWithTracking(
-      ctx,
-      'Brak kontekstu użytkownika. Ta komenda wymaga uprawnień administratora.',
-      'require_admin:no_user',
-    );
+    if (notify) {
+      await replyWithTracking(
+        ctx,
+        'Brak kontekstu użytkownika. Ta komenda wymaga uprawnień administratora.',
+        'require_admin:no_user',
+      );
+    }
     return false;
   }
   if (configStore.isAdmin(userId)) {
@@ -60,14 +65,18 @@ const requireAdmin = async (ctx: Context): Promise<boolean> => {
   }
   const became = configStore.ensureBootstrapAdmin(userId);
   if (became) {
-    await replyWithTracking(
-      ctx,
-      'Nie było żadnych adminów, dodano Cię jako pierwszego administratora.',
-      'require_admin:bootstrap',
-    );
+    if (notify) {
+      await replyWithTracking(
+        ctx,
+        'Nie było żadnych adminów, dodano Cię jako pierwszego administratora.',
+        'require_admin:bootstrap',
+      );
+    }
     return true;
   }
-  await replyWithTracking(ctx, 'Nie masz uprawnień administratora.', 'require_admin:denied');
+  if (notify) {
+    await replyWithTracking(ctx, 'Nie masz uprawnień administratora.', 'require_admin:denied');
+  }
   return false;
 };
 
@@ -85,15 +94,15 @@ const parseNumericArgument = (ctx: Context): number | null => {
   return Number.isNaN(parsed) ? null : parsed;
 };
 
+type ChannelReference = {
+  forward_from_chat?: { id?: number };
+  sender_chat?: { id?: number };
+};
+
 type MessageWithForward = {
-  reply_to_message?: {
-    forward_from_chat?: {
-      id?: number;
-    };
-  };
-  forward_from_chat?: {
-    id?: number;
-  };
+  reply_to_message?: ChannelReference;
+  forward_from_chat?: { id?: number };
+  sender_chat?: { id?: number };
 };
 
 const sendToChatWithTracking = async (
@@ -380,11 +389,15 @@ bot.command('list_admins', async (ctx) => {
     return;
   }
   const adminIds = configStore.getAdminIds();
-  const text =
-    adminIds.length === 0
-      ? 'Brak zdefiniowanych administratorów.'
-      : `Administratorzy:\n${adminIds.map((id) => `- ${id}`).join('\n')}`;
-  await replyWithTracking(ctx, text, 'list_admins');
+  if (adminIds.length === 0) {
+    await replyWithTracking(ctx, 'Brak zdefiniowanych administratorów.', 'list_admins:empty');
+    return;
+  }
+  const text = ['Lista adminów:', ...adminIds.map((id) => `• ${id}`)].join('\n');
+  const keyboard = Markup.inlineKeyboard(
+    adminIds.map((id) => [Markup.button.callback(`❌ Usuń ${id}`, `rmadmin:${id}`)]),
+  );
+  await replyWithTracking(ctx, text, 'list_admins', keyboard);
 });
 
 bot.command('add_admin', async (ctx) => {
@@ -450,21 +463,30 @@ bot.command('set_channel', async (ctx) => {
   }
   const targetFromContext = isChannelContext ? chat?.id : null;
   const forwardedId =
-    message?.reply_to_message?.forward_from_chat?.id ?? message?.forward_from_chat?.id ?? null;
-  const targetId =
-    typeof targetFromContext === 'number'
-      ? targetFromContext
-      : forwardedId ?? parseNumericArgument(ctx);
-  if (typeof targetId !== 'number') {
+    message?.reply_to_message?.forward_from_chat?.id ??
+    message?.reply_to_message?.sender_chat?.id ??
+    message?.forward_from_chat?.id ??
+    message?.sender_chat?.id ??
+    null;
+  const targetCandidate =
+    typeof targetFromContext === 'number' ? targetFromContext : forwardedId ?? parseNumericArgument(ctx);
+  if (typeof targetCandidate !== 'number') {
     await replyWithTracking(
       ctx,
-      'Nie rozpoznano ID kanału. Użyj `/set_channel <id>` lub odpowiedz na wiadomość z kanału.',
+      'Nie rozpoznano ID kanału. Użyj `/set_channel <id>`, wykonaj komendę z kanału lub odpowiedz na wiadomość przekazaną z kanału.',
       'set_channel:missing',
     );
     return;
   }
-  configStore.setMainChannelId(targetId);
-  await replyWithTracking(ctx, `Zapisano kanał ${targetId}.`, 'set_channel:confirm');
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback('✅ Ustaw ten kanał', `setchan:${targetCandidate}`)],
+  ]);
+  await replyWithTracking(
+    ctx,
+    `Wykryto kanał o ID: ${targetCandidate}\nCzy chcesz ustawić go jako główny?`,
+    'set_channel:confirm_prompt',
+    keyboard,
+  );
 });
 
 bot.command('channel_test', async (ctx) => {
@@ -1056,6 +1078,47 @@ bot.on('callback_query', async (ctx) => {
       'callback_edit:started',
     );
     await ctx.editMessageReplyMarkup(undefined).catch(() => undefined);
+    return;
+  }
+
+  if (action === 'rmadmin') {
+    if (!(await requireAdmin(ctx, { notify: false }))) {
+      await ctx.answerCbQuery('Brak uprawnień admina.', { show_alert: true });
+      return;
+    }
+    if (!configStore.isAdmin(targetId)) {
+      await ctx.answerCbQuery('Ten użytkownik nie jest adminem.');
+      return;
+    }
+    configStore.removeAdmin(targetId);
+    await ctx.answerCbQuery(`Usunięto admina: ${targetId}`);
+    const adminIds = configStore.getAdminIds();
+    if (adminIds.length === 0) {
+      await ctx
+        .editMessageText('Brak zdefiniowanych administratorów.')
+        .catch(() => undefined);
+      return;
+    }
+    const body = ['Lista adminów:', ...adminIds.map((id) => `• ${id}`)].join('\n');
+    const keyboard = Markup.inlineKeyboard(
+      adminIds.map((id) => [Markup.button.callback(`❌ Usuń ${id}`, `rmadmin:${id}`)]),
+    );
+    await ctx
+      .editMessageText(body, keyboard)
+      .catch(() => undefined);
+    return;
+  }
+
+  if (action === 'setchan') {
+    if (!(await requireAdmin(ctx, { notify: false }))) {
+      await ctx.answerCbQuery('Brak uprawnień admina.', { show_alert: true });
+      return;
+    }
+    configStore.setMainChannelId(targetId);
+    await ctx.answerCbQuery('Kanał ustawiony.');
+    await ctx
+      .editMessageText(`Kanał został ustawiony jako główny: ${targetId}`)
+      .catch(() => undefined);
     return;
   }
 
