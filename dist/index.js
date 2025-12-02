@@ -4,7 +4,7 @@ import { Markup, Telegraf } from 'telegraf';
 import editSessionStore from './editSessionStore.js';
 import jobStore, {} from './jobStore.js';
 import messageStore, {} from './messageStore.js';
-import configStore from './configStore.js';
+import configStore, { isProd } from './configStore.js';
 import { startPanelServer } from './panelServer.js';
 const token = process.env.BOT_TOKEN;
 if (!token) {
@@ -329,6 +329,22 @@ bot.command('list_admins', async (ctx) => {
     const text = ['Lista adminów:', ...adminIds.map((id) => `• ${id}`)].join('\n');
     const keyboard = Markup.inlineKeyboard(adminIds.map((id) => [Markup.button.callback(`❌ Usuń ${id}`, `rmadmin:${id}`)]));
     await replyWithTracking(ctx, text, 'list_admins', keyboard);
+});
+bot.command('debug_config', async (ctx) => {
+    if (!(await requireAdmin(ctx))) {
+        return;
+    }
+    const admins = configStore.getAdminIds();
+    const channelId = configStore.getMainChannelId();
+    const nodeEnv = process.env.NODE_ENV ?? 'undefined';
+    const modeDescription = isProd ? 'PROD (ENV)' : 'DEV (config file)';
+    const text = [
+        'Debug config:',
+        `NODE_ENV: ${nodeEnv} (${modeDescription})`,
+        `Admin IDs: ${admins.length ? admins.join(', ') : 'brak'}`,
+        `Main channel ID: ${channelId ?? 'brak'}`,
+    ].join('\n');
+    await ctx.reply(text);
 });
 bot.command('add_admin', async (ctx) => {
     if (!(await requireAdmin(ctx))) {

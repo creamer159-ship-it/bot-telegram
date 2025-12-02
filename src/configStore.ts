@@ -1,7 +1,7 @@
 import { mkdir, readFile, writeFile } from 'fs/promises';
 import path from 'path';
 
-const isProd = process.env.NODE_ENV === 'production';
+export const isProd = process.env.NODE_ENV === 'production';
 const DATA_DIR = path.resolve(process.cwd(), 'data');
 const CONFIG_PATH = path.join(DATA_DIR, 'config.json');
 

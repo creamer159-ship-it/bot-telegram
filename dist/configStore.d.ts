@@ -1,3 +1,4 @@
+export declare const isProd: boolean;
 export type BotConfig = {
     adminIds: number[];
     mainChannelId: number | null;
