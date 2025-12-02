@@ -6,9 +6,8 @@ import type { Message as TelegramMessage, MessageEntity } from 'telegraf/types';
 import editSessionStore from './editSessionStore.js';
 import jobStore, { type JobContentType, type ScheduledJob } from './jobStore.js';
 import messageStore, { type StoredMessage } from './messageStore.js';
+import configStore from './configStore.js';
 import { startPanelServer } from './panelServer.js';
-
-const CHANNEL_ID = -1003327770463;
 const token = process.env.BOT_TOKEN;
 if (!token) {
   console.error('Brak BOT_TOKEN w pliku .env');
@@ -47,6 +46,49 @@ const replyWithTracking = async (
   return sentMessage;
 };
 
+const isAdminCtx = (ctx: Context): boolean => {
+  const userId = ctx.from?.id;
+  return typeof userId === 'number' && configStore.isAdmin(userId);
+};
+
+const requireAdmin = async (ctx: Context): Promise<boolean> => {
+  const userId = ctx.from?.id;
+  if (typeof userId !== 'number') {
+    await replyWithTracking(ctx, 'Polecenie dostępne tylko w prywatnym czacie.', 'require_admin:no_user');
+    return false;
+  }
+  if (!isAdminCtx(ctx)) {
+    await replyWithTracking(ctx, 'Nie masz uprawnień administratora.', 'require_admin:denied');
+    return false;
+  }
+  return true;
+};
+
+const parseNumericArgument = (ctx: Context): number | null => {
+  const message = ctx.message as { text?: string } | undefined;
+  const text = message?.text?.trim();
+  if (!text) {
+    return null;
+  }
+  const [, param] = text.split(/\s+/);
+  if (!param) {
+    return null;
+  }
+  const parsed = Number(param);
+  return Number.isNaN(parsed) ? null : parsed;
+};
+
+type MessageWithForward = {
+  reply_to_message?: {
+    forward_from_chat?: {
+      id?: number;
+    };
+  };
+  forward_from_chat?: {
+    id?: number;
+  };
+};
+
 const sendToChatWithTracking = async (
   chatId: number,
   text: string,
@@ -58,22 +100,13 @@ const sendToChatWithTracking = async (
   return sentMessage;
 };
 
-const getChannelId = (): number | null => {
-  const envChannelId = process.env.CHANNEL_ID;
-  if (envChannelId) {
-    const parsed = Number(envChannelId);
-    if (!Number.isNaN(parsed)) {
-      return parsed;
-    }
-  }
-  return typeof CHANNEL_ID === 'number' && !Number.isNaN(CHANNEL_ID) ? CHANNEL_ID : null;
-};
+const getChannelId = (): number | null => configStore.getMainChannelId();
 
 const requireChannelId = async (ctx: Context) => {
   const channelId = getChannelId();
   if (channelId === null) {
     await ctx.reply(
-      'Kanał nie jest skonfigurowany. Ustaw CHANNEL_ID w środowisku lub użyj komendy do powiązania kanału.',
+      'Kanał nie jest skonfigurowany. Ustaw CHANNEL_ID w środowisku lub użyj /set_channel, aby zapisać kanał.',
     );
     return null;
   }
@@ -309,6 +342,13 @@ const helpMessage = [
   '  Odpowiedz na media, aby wysłać zdjęcie/wideo/gif (jak dotąd).',
   '',
   'Więcej o formacie CRON: /cron_help',
+  '',
+  'Sekcja admina:',
+  '/list_admins – lista ID administratorów zapisanych w konfiguracji.',
+  '/add_admin – dodaj administratora przez ID lub odpowiedź na wiadomość.',
+  '/remove_admin – usuń administratora przez ID lub odpowiedź na wiadomość.',
+  '/current_channel – pokaż aktualnie ustawiony kanał docelowy.',
+  '/set_channel – zapisz kanał (komenda działa z tła kanału, reply lub ID).',
 ].join('\n');
 
 const cronHelpMessage = [
@@ -348,6 +388,98 @@ bot.command('ping', (ctx) => replyWithTracking(ctx, 'pong', 'ping'));
 bot.command('help', (ctx) => replyWithTracking(ctx, helpMessage, 'help'));
 
 bot.command('cron_help', (ctx) => replyWithTracking(ctx, cronHelpMessage, 'cron_help'));
+
+bot.command('list_admins', async (ctx) => {
+  if (!(await requireAdmin(ctx))) {
+    return;
+  }
+  const adminIds = configStore.getAdminIds();
+  const text =
+    adminIds.length === 0
+      ? 'Brak zdefiniowanych administratorów.'
+      : `Administratorzy:\n${adminIds.map((id) => `- ${id}`).join('\n')}`;
+  await replyWithTracking(ctx, text, 'list_admins');
+});
+
+bot.command('add_admin', async (ctx) => {
+  if (!(await requireAdmin(ctx))) {
+    return;
+  }
+  const replyId = ctx.message?.reply_to_message?.from?.id;
+  const targetId = typeof replyId === 'number' ? replyId : parseNumericArgument(ctx);
+  if (typeof targetId !== 'number') {
+    await replyWithTracking(
+      ctx,
+      'Podaj ID użytkownika jako argument lub odpowiedz na jego wiadomość.',
+      'add_admin:missing',
+    );
+    return;
+  }
+  if (configStore.addAdmin(targetId)) {
+    await replyWithTracking(ctx, `Dodano administratora ${targetId}.`, 'add_admin:success');
+    return;
+  }
+  await replyWithTracking(ctx, `Administrator ${targetId} już istnieje.`, 'add_admin:exists');
+});
+
+bot.command('remove_admin', async (ctx) => {
+  if (!(await requireAdmin(ctx))) {
+    return;
+  }
+  const replyId = ctx.message?.reply_to_message?.from?.id;
+  const targetId = typeof replyId === 'number' ? replyId : parseNumericArgument(ctx);
+  if (typeof targetId !== 'number') {
+    await replyWithTracking(
+      ctx,
+      'Podaj ID użytkownika jako argument lub odpowiedz na jego wiadomość.',
+      'remove_admin:missing',
+    );
+    return;
+  }
+  if (configStore.removeAdmin(targetId)) {
+    await replyWithTracking(ctx, `Usunięto administratora ${targetId}.`, 'remove_admin:success');
+  } else {
+    await replyWithTracking(ctx, `Administrator ${targetId} nie istnieje.`, 'remove_admin:not_found');
+  }
+});
+
+bot.command('current_channel', async (ctx) => {
+  if (!(await requireAdmin(ctx))) {
+    return;
+  }
+  const channelId = configStore.getMainChannelId();
+  const text = channelId
+    ? `Aktualny kanał docelowy: ${channelId}`
+    : 'Kanał docelowy nie został ustawiony.';
+  await replyWithTracking(ctx, text, 'current_channel');
+});
+
+bot.command('set_channel', async (ctx) => {
+  const message = ctx.message as MessageWithForward | undefined;
+  const chat = ctx.chat as { id?: number; type?: string } | undefined;
+  const chatType = chat?.type;
+  const isChannelContext = chatType === 'channel';
+  if (!isChannelContext && !(await requireAdmin(ctx))) {
+    return;
+  }
+  const targetFromContext = isChannelContext ? chat?.id : null;
+  const forwardedId =
+    message?.reply_to_message?.forward_from_chat?.id ?? message?.forward_from_chat?.id ?? null;
+  const targetId =
+    typeof targetFromContext === 'number'
+      ? targetFromContext
+      : forwardedId ?? parseNumericArgument(ctx);
+  if (typeof targetId !== 'number') {
+    await replyWithTracking(
+      ctx,
+      'Nie rozpoznano ID kanału. Użyj `/set_channel <id>` lub odpowiedz na wiadomość z kanału.',
+      'set_channel:missing',
+    );
+    return;
+  }
+  configStore.setMainChannelId(targetId);
+  await replyWithTracking(ctx, `Zapisano kanał ${targetId}.`, 'set_channel:confirm');
+});
 
 bot.command('channel_test', async (ctx) => {
   const channelId = await requireChannelId(ctx);
