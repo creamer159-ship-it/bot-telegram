@@ -936,6 +936,47 @@ const cronHelpMessage = [
   'Na kanale możesz też odpowiedzieć na media lub tekst — tekst komendy zostanie zignorowany w trybie reply.',
 ].join('\n');
 
+const wizardHelpText = [
+  '<b>Kreator /wizard – planowanie bez crona</b>',
+  '',
+  '1. Napisz post jako zwykłą wiadomość: tekst <i>lub</i> reply do zdjęcia / wideo / gifa z podpisem.',
+  '2. Zrób reply na ten post i wpisz <code>/wizard</code>.',
+  '3. Wybierz tryb:',
+  '   • <b>Jednorazowo</b> – jeden konkretny termin,',
+  '   • <b>Codziennie o godzinie</b> – stała godzina każdego dnia,',
+  '   • <b>Co tydzień</b> – wybrany dzień tygodnia i godzina.',
+  '4. Wybierz miejsce publikacji: „Ten czat” lub „Kanał domyślny”.',
+  '5. Podaj datę / godzinę zgodnie z formatami poniżej.',
+  '6. Gotowe zadania sprawdzisz w <code>/list_jobs</code> oraz <code>/list_posts</code>.',
+  '',
+  'Przykłady:',
+  '',
+  'Codziennie o 12:02 (ten czat):',
+  '"Reply na post → /wizard → <b>Codziennie o godzinie</b> → wpisz <code>12:02</code> → wybierz <b>Ten czat</b>."',
+  '',
+  'W każdy piątek o 18:00 (kanał domyślny):',
+  '"Reply na draft → /wizard → <b>Co tydzień</b> → wpisz <code>pt 18:00</code> → wybierz <b>Kanał domyślny</b>."',
+  '',
+  'Jednorazowo, 7 grudnia 2025 o 18:30:',
+  '"Reply → /wizard → <b>Jednorazowo</b> → wpisz <code>07.12.2025 18:30</code>."',
+  '',
+  'Formaty daty i czasu:',
+  '',
+  'Jednorazowo: <b>DD.MM.RRRR HH:MM</b>',
+  'przykłady: 07.12.2025 18:30, 01.01.2026 00:05',
+  '',
+  'Codziennie: <b>HH:MM</b>',
+  'przykłady: 09:00, 23:45',
+  '',
+  'Co tydzień: <b>DZ HH:MM</b>',
+  'gdzie DZ to skrót dnia tygodnia:',
+  'pn, wt, sr, czw, pt, sob, nd',
+  'możesz też przyjąć angielskie: mon, tue, wed, thu, fri, sat, sun',
+  'przykłady: pt 18:00, mon 09:15',
+  '',
+  'Kreator sam zadba, by termin był w przyszłości, a zaplanowane zadania możesz przeglądać i usuwać przez /list_jobs, /jobstop, /list_posts oraz powiązane przyciski.',
+].join('\n');
+
 // /ping — szybki test działania
 bot.command('ping', (ctx) => replyWithTracking(ctx, 'pong', 'ping'));
 
@@ -947,7 +988,7 @@ bot.command('help', async (ctx) => {
       '/schedule – ustaw cron w czacie',
       '/schedule_channel – cron na kanał',
       '/test_post – testowy post',
-      '/wizard – prosty kreator harmonogramu (bez CRON-a, używaj jako reply)',
+      '/wizard – prosty kreator harmonogramu (bez CRON-a, używaj jako reply; szczegóły w /help_wizard)',
     ],
     zadania: ['/list_posts – lista postów', '/list_jobs – aktywne zadania'],
     kanal: ['/current_channel – pokaż kanał', '/set_channel – ustaw kanał'],
@@ -976,6 +1017,13 @@ bot.command('help', async (ctx) => {
 
   msg += '🔧 <b>Debug / system</b>\n' + sections.debug.join('\n');
   await ctx.reply(msg, { parse_mode: 'HTML' });
+});
+
+bot.command('help_wizard', async (ctx) => {
+  if (!(await requireAdmin(ctx))) {
+    return;
+  }
+  await replyWithTracking(ctx, wizardHelpText, 'help_wizard', { parse_mode: 'HTML' });
 });
 
 bot.command('help_inline', async (ctx) => {
@@ -1049,7 +1097,7 @@ bot.action('help:plan', async (ctx) => {
     '<code>/schedule "*/30 * * * * *" To idzie co 30 sekund w tym czacie</code>\n\n' +
     '<b>/schedule_channel "CRON"</b> (reply do wiadomości z treścią)\n' +
     '– planuje publikację na USTAWIONYM kanale.\n\n' +
-    '<b>/wizard</b> – prosty kreator harmonogramu bez CRON-a (użyj jako reply).\n\n' +
+    '<b>/wizard</b> – prosty kreator harmonogramu bez CRON-a (użyj jako reply, szczegóły w /help_wizard).\n\n' +
     '<b>Planowanie bez CRON</b>\n' +
     '– Odpowiedz na wiadomość z treścią, uruchom /wizard i podaj tryb oraz godzinę.\n\n' +
     '<b>Instrukcje:</b>\n' +
@@ -1057,7 +1105,7 @@ bot.action('help:plan', async (ctx) => {
     '- np. <code>*/10 * * * * *</code> – co 10 sekund\n' +
     '- np. <code>0 */5 * * * *</code> – co 5 minut';
   const keyboard = Markup.inlineKeyboard([
-    [Markup.button.callback('🧙‍♂️ Kreator /wizard', 'help:wizard')],
+    [Markup.button.callback('🧠 Kreator /wizard', 'help:wizard')],
     [Markup.button.callback('📑 Zadania CRON', 'help:jobs')],
     [Markup.button.callback('⬅️ Wróć do menu', 'help:back')],
   ]);
@@ -1066,14 +1114,7 @@ bot.action('help:plan', async (ctx) => {
 
 bot.action('help:wizard', async (ctx) => {
   await ctx.answerCbQuery();
-  const text =
-    '🧙‍♂️ <b>Kreator /wizard</b>\n\n' +
-    '1) Napisz post (tekst lub media z podpisem) i pozostaw go jako zwykłą wiadomość.\n' +
-    '2) Odpowiedz na ten post, wpisz /wizard i wybierz tryb harmonogramu.\n' +
-    '3) Wybierz, czy post ma być jednorazowy, codzienny czy tygodniowy.\n' +
-    '4) Wskaż, gdzie publikować (ten czat lub kanał domyślny).\n' +
-    '5) Podaj godzinę lub datę zgodnie z zaproponowanym formatem.\n' +
-    '6) Gotowe zadania pojawią się w /list_jobs i /list_posts.';
+  const text = wizardHelpText;
   const keyboard = Markup.inlineKeyboard([
     [Markup.button.callback('🕒 Planowanie', 'help:plan')],
     [Markup.button.callback('⬅️ Wróć do menu', 'help:back')],
