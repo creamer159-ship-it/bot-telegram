@@ -56,6 +56,14 @@ const replyWithTracking = async (
   return sentMessage;
 };
 
+const isAdminCtx = async (ctx: Context): Promise<boolean> => {
+  const userId = ctx.from?.id;
+  if (typeof userId !== 'number') {
+    return false;
+  }
+  return configStore.isAdmin(userId);
+};
+
 const requireAdmin = async (
   ctx: Context,
   { notify = true }: { notify?: boolean } = {},
@@ -95,6 +103,47 @@ const requireAdmin = async (
     await replyWithTracking(ctx, message, 'require_admin:denied');
   }
   return false;
+};
+
+const buildHelpMenuPayload = (isAdmin: boolean) => {
+  const text =
+    '✨ <b>Panel pomocy</b>\n\n' +
+    'Wybierz kategorię, żeby zobaczyć szczegóły:\n\n' +
+    '📌 Podstawowe\n' +
+    '🕒 Planowanie postów\n' +
+    '📑 Zadania CRON\n' +
+    '📢 Kanał\n' +
+    (isAdmin ? '🛡 Administracja\n' : '') +
+    '🔧 Debug / system';
+  const buttons: ReturnType<typeof Markup.button.callback>[][] = [
+    [Markup.button.callback('📌 Podstawowe', 'help:basic')],
+    [Markup.button.callback('🕒 Planowanie', 'help:plan')],
+    [Markup.button.callback('📑 Zadania CRON', 'help:jobs')],
+    [Markup.button.callback('📢 Kanał', 'help:channel')],
+  ];
+  if (isAdmin) {
+    buttons.push([Markup.button.callback('🛡 Admin', 'help:admin')]);
+  }
+  buttons.push([Markup.button.callback('🔧 Debug / system', 'help:debug')]);
+  return { text, keyboard: Markup.inlineKeyboard(buttons) };
+};
+
+const safeEditHelpMessage = async (
+  ctx: Context,
+  text: string,
+  keyboard: ReturnType<typeof Markup.inlineKeyboard>,
+) => {
+  const options = { parse_mode: 'HTML' as const, ...keyboard };
+  try {
+    await ctx.editMessageText(text, options);
+  } catch {
+    await ctx.reply(text, options);
+  }
+};
+
+const showHelpMainMenu = async (ctx: Context) => {
+  const payload = buildHelpMenuPayload(await isAdminCtx(ctx));
+  await safeEditHelpMessage(ctx, payload.text, payload.keyboard);
 };
 
 const parseNumericArgument = (ctx: Context): number | null => {
@@ -381,7 +430,7 @@ const cronHelpMessage = [
 bot.command('ping', (ctx) => replyWithTracking(ctx, 'pong', 'ping'));
 
 bot.command('help', async (ctx) => {
-  const isAdminUser = configStore.isAdmin(ctx.from?.id ?? 0);
+  const isAdminUser = await isAdminCtx(ctx);
   const sections = {
     podstawowe: ['/ping – sprawdź czy bot działa'],
     planowanie: [
@@ -418,7 +467,114 @@ bot.command('help', async (ctx) => {
   await ctx.reply(msg, { parse_mode: 'HTML' });
 });
 
+bot.command('help_inline', async (ctx) => {
+  const payload = buildHelpMenuPayload(await isAdminCtx(ctx));
+  const options = { parse_mode: 'HTML' as const, ...payload.keyboard };
+  await ctx.reply(payload.text, options);
+});
+
 bot.command('cron_help', (ctx) => replyWithTracking(ctx, cronHelpMessage, 'cron_help'));
+
+bot.action('help:basic', async (ctx) => {
+  await ctx.answerCbQuery();
+  const text =
+    '✨ <b>Podstawowe komendy</b>\n\n' +
+    '<b>/ping</b> – sprawdź, czy bot działa (powinien odpowiedzieć "pong").\n\n' +
+    '<b>/help</b> – klasyczna lista komend w formie tekstowej.\n\n' +
+    '<b>/help_inline</b> – panel pomocy z przyciskami.';
+  const keyboard = Markup.inlineKeyboard([[Markup.button.callback('⬅️ Wróć do menu', 'help:back')]]);
+  await safeEditHelpMessage(ctx, text, keyboard);
+});
+
+bot.action('help:plan', async (ctx) => {
+  await ctx.answerCbQuery();
+  const text =
+    '✨ <b>Planowanie postów</b>\n\n' +
+    '<b>/schedule "CRON" Tekst</b>\n' +
+    '– planuje wysyłanie wiadomości w bieżącym czacie.\n' +
+    'Przykład:\n' +
+    '<code>/schedule "*/30 * * * * *" To idzie co 30 sekund w tym czacie</code>\n\n' +
+    '<b>/schedule_channel "CRON"</b> (reply do wiadomości z treścią)\n' +
+    '– planuje publikację na USTAWIONYM kanale.\n\n' +
+    '<b>Instrukcje:</b>\n' +
+    '- CRON ma 6 pól: <code>sekunda minuta godzina dzień miesiąc dzień_tygodnia</code>\n' +
+    '- np. <code>*/10 * * * * *</code> – co 10 sekund\n' +
+    '- np. <code>0 */5 * * * *</code> – co 5 minut';
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback('📑 Zadania CRON', 'help:jobs')],
+    [Markup.button.callback('⬅️ Wróć do menu', 'help:back')],
+  ]);
+  await safeEditHelpMessage(ctx, text, keyboard);
+});
+
+bot.action('help:jobs', async (ctx) => {
+  await ctx.answerCbQuery();
+  const text =
+    '✨ <b>Zarządzanie zadaniami CRON</b>\n\n' +
+    '<b>/list_jobs</b> – pokazuje aktywne zadania (pod listą znajdziesz przyciski do zatrzymania lub usunięcia zadania).\n\n' +
+    '<b>/list_posts</b> – lista zaplanowanych postów, przycisków ✏️/🗑 do edycji lub kasowania.';
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback('🕒 Planowanie', 'help:plan')],
+    [Markup.button.callback('⬅️ Wróć do menu', 'help:back')],
+  ]);
+  await safeEditHelpMessage(ctx, text, keyboard);
+});
+
+bot.action('help:channel', async (ctx) => {
+  await ctx.answerCbQuery();
+  const text =
+    '✨ <b>Ustawianie kanału</b>\n\n' +
+    '<b>/current_channel</b> – pokazuje aktualnie ustawiony kanał.\n\n' +
+    '<b>/set_channel</b> – ustawianie kanału na 3 sposoby:\n' +
+    '1) W kanale: dodaj bota jako admina i napisz <code>/set_channel</code> w kanale.\n' +
+    '2) Reply na przekazaną wiadomość: forward z kanału, reply do tej wiadomości i <code>/set_channel</code>.\n' +
+    '3) Po ID: <code>/set_channel -1001234567890</code>.';
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback('🕒 Planowanie', 'help:plan')],
+    [Markup.button.callback('⬅️ Wróć do menu', 'help:back')],
+  ]);
+  await safeEditHelpMessage(ctx, text, keyboard);
+});
+
+bot.action('help:admin', async (ctx) => {
+  if (!(await isAdminCtx(ctx))) {
+    await ctx.answerCbQuery('Ta część jest tylko dla adminów.', { show_alert: true });
+    return;
+  }
+  await ctx.answerCbQuery();
+  const text =
+    '🛡 <b>Panel administratora</b>\n\n' +
+    '<b>/list_admins</b> – lista adminów.\n\n' +
+    '<b>/add_admin</b>\n' +
+    '- reply do użytkownika + <code>/add_admin</code> – dodaje go.\n' +
+    '- <code>/add_admin 123456789</code> – dodaje ID.\n\n' +
+    '<b>/remove_admin</b>\n' +
+    '- reply do admina + <code>/remove_admin</code> – usuwa.\n' +
+    '- <code>/remove_admin 123456789</code> – usuwa po ID.';
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback('📢 Kanał', 'help:channel')],
+    [Markup.button.callback('⬅️ Wróć do menu', 'help:back')],
+  ]);
+  await safeEditHelpMessage(ctx, text, keyboard);
+});
+
+bot.action('help:debug', async (ctx) => {
+  await ctx.answerCbQuery();
+  const text =
+    '🔧 <b>Debug / system</b>\n\n' +
+    '<b>/debug_config</b> – pokazuje tryb (DEV/PROD), adminów widzianych przez bota i aktualny kanał.\n\n' +
+    'Uwaga: na produkcji (NODE_ENV=production) admini i kanał są zwykle brane z ENV (ADMIN_IDS, CHANNEL_ID).';
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback('📌 Podstawowe', 'help:basic')],
+    [Markup.button.callback('⬅️ Wróć do menu', 'help:back')],
+  ]);
+  await safeEditHelpMessage(ctx, text, keyboard);
+});
+
+bot.action('help:back', async (ctx) => {
+  await ctx.answerCbQuery();
+  await showHelpMainMenu(ctx);
+});
 
 bot.command('list_admins', async (ctx) => {
   if (!(await requireAdmin(ctx))) {
