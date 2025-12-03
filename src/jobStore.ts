@@ -5,6 +5,8 @@ import path from 'node:path';
 import type { MessageEntity } from 'telegraf/types';
 
 export type JobContentType = 'text' | 'photo' | 'video' | 'animation';
+export type RepeatMode = 'none' | 'daily' | 'weekly' | 'monthly';
+export type ScheduledJobType = 'post' | 'cron';
 
 export interface ScheduledJobData {
   id: number;
@@ -15,6 +17,9 @@ export interface ScheduledJobData {
   text?: string | undefined;
   fileId?: string | undefined;
   entities?: MessageEntity[] | undefined;
+  scheduledAt?: string | undefined;
+  repeat?: RepeatMode | undefined;
+  type?: ScheduledJobType | undefined;
 }
 
 export interface ScheduledJob extends ScheduledJobData {
@@ -99,6 +104,9 @@ class JobStore {
       text: params.text,
       fileId: params.fileId,
       entities: params.entities,
+      scheduledAt: params.scheduledAt,
+      repeat: params.repeat,
+      type: params.type,
       job: params.job,
     };
     const ownerJobs = this.jobsByOwner.get(params.ownerChatId) ?? new Map<number, ScheduledJob>();
@@ -127,6 +135,35 @@ class JobStore {
     }
     jobRecord.text = text;
     jobRecord.entities = undefined;
+    this.persistState();
+    return jobRecord;
+  }
+
+  updateJobContent(
+    jobId: number,
+    updates: {
+      contentType?: JobContentType;
+      text?: string | undefined;
+      entities?: MessageEntity[] | undefined;
+      fileId?: string | undefined;
+    },
+  ): ScheduledJob | undefined {
+    const jobRecord = this.getJobById(jobId);
+    if (!jobRecord) {
+      return undefined;
+    }
+    if (updates.contentType) {
+      jobRecord.contentType = updates.contentType;
+    }
+    if ('text' in updates) {
+      jobRecord.text = updates.text;
+    }
+    if ('entities' in updates) {
+      jobRecord.entities = updates.entities;
+    }
+    if ('fileId' in updates) {
+      jobRecord.fileId = updates.fileId;
+    }
     this.persistState();
     return jobRecord;
   }
@@ -173,7 +210,11 @@ class JobStore {
     return undefined;
   }
 
-  async updateCron(jobId: number, cronExpr: string): Promise<ScheduledJob | undefined> {
+  async updateCron(
+    jobId: number,
+    cronExpr: string,
+    metadata: { scheduledAt?: string; repeat?: RepeatMode } = {},
+  ): Promise<ScheduledJob | undefined> {
     const jobRecord = this.getJobById(jobId);
     if (!jobRecord) {
       return undefined;
@@ -192,6 +233,12 @@ class JobStore {
       }
     }
     jobRecord.cronExpr = cronExpr;
+    if (metadata.scheduledAt !== undefined) {
+      jobRecord.scheduledAt = metadata.scheduledAt;
+    }
+    if (metadata.repeat !== undefined) {
+      jobRecord.repeat = metadata.repeat;
+    }
     this.persistState();
     return jobRecord;
   }

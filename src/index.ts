@@ -4,7 +4,12 @@ import { Markup, Telegraf } from 'telegraf';
 import type { Context } from 'telegraf';
 import type { Message as TelegramMessage, MessageEntity } from 'telegraf/types';
 import editSessionStore from './editSessionStore.js';
-import jobStore, { type JobContentType, type ScheduledJob } from './jobStore.js';
+import jobStore, {
+  type JobContentType,
+  type RepeatMode,
+  type ScheduledJob,
+  type ScheduledJobType,
+} from './jobStore.js';
 import messageStore, { type StoredMessage } from './messageStore.js';
 import configStore, { isProd } from './configStore.js';
 import { startPanelServer } from './panelServer.js';
@@ -25,6 +30,7 @@ const BOT_COMMANDS = [
   { command: 'schedule', description: 'Cron: wysyłaj w czacie' },
   { command: 'schedule_channel', description: 'Cron: wysyłaj na kanał' },
   { command: 'test_post', description: 'Wyślij post testowy' },
+  { command: 'wizard', description: 'Prosty kreator harmonogramu (reply na wiadomość)' },
 
   // Posty / zadania
   { command: 'list_posts', description: 'Lista zaplanowanych postów' },
@@ -41,6 +47,7 @@ const BOT_COMMANDS = [
 
   // System / debug
   { command: 'debug_config', description: 'Podgląd konfiguracji bota' },
+  { command: 'wizard_channel', description: 'Wizard kanału (once/daily/weekly)' },
 ];
 
 type ReplyOptions = Parameters<Context['reply']>[1];
@@ -261,6 +268,64 @@ const usageMessages = {
   cancelJob: 'Użycie: /cancel_job <job_id>\nnp: /cancel_job 1',
 };
 
+const createScheduledJob = (
+  ownerChatId: number,
+  targetChatId: number,
+  cronExpr: string,
+  payload: {
+    contentType: JobContentType;
+    text?: string | undefined;
+    entities?: MessageEntity[] | undefined;
+    fileId?: string | undefined;
+  },
+  metadata?: {
+    scheduledAt?: string | undefined;
+    repeat?: RepeatMode | undefined;
+    type?: ScheduledJobType | undefined;
+  },
+) => {
+  let createdJobId: number | null = null;
+  const job = new CronJob(
+    cronExpr,
+    async () => {
+      try {
+        if (createdJobId === null) {
+          return;
+        }
+        const jobData = jobStore.getJob(ownerChatId, createdJobId);
+        if (!jobData) {
+          return;
+        }
+        await sendScheduledJobContent(jobData);
+        if (jobData.repeat === 'none') {
+          jobStore.removeJob(ownerChatId, createdJobId);
+        }
+      } catch (cronError) {
+        console.error('Nie udało się wysłać zaplanowanej wiadomości.', cronError);
+      }
+    },
+    null,
+    true,
+    'Europe/Warsaw',
+  );
+  const jobRecord = jobStore.addJob({
+    ownerChatId,
+    targetChatId,
+    cronExpr,
+    contentType: payload.contentType,
+    text: payload.text,
+    fileId: payload.fileId,
+    entities: payload.entities,
+    scheduledAt: metadata?.scheduledAt,
+    repeat: metadata?.repeat,
+    type: metadata?.type ?? 'cron',
+    job,
+  });
+  createdJobId = jobRecord.id;
+  job.start();
+  return jobRecord;
+};
+
 const DEFAULT_LIST_POSTS_LIMIT = 10;
 const MAX_LIST_POSTS_LIMIT = 50;
 
@@ -345,6 +410,451 @@ const extractMediaFromMessage = (
     return { contentType: 'animation', fileId: payload.animation.file_id as string };
   }
   return null;
+};
+
+type Payload = {
+  contentType: JobContentType;
+  text?: string;
+  entities?: MessageEntity[];
+  fileId?: string;
+};
+
+const extractPayloadFromMessage = (message?: TelegramMessage): Payload | null => {
+  if (!message) {
+    return null;
+  }
+  const mediaInfo = extractMediaFromMessage(message);
+  const { text: replyText, entities: replyEntities } = getTextAndEntities(message);
+  const hasReplyText = typeof replyText === 'string' && replyText.trim().length > 0;
+
+  if (!mediaInfo && !hasReplyText) {
+    return null;
+  }
+
+  if (mediaInfo) {
+    const payload: Payload = {
+      contentType: mediaInfo.contentType,
+      fileId: mediaInfo.fileId,
+    };
+    if (hasReplyText && replyText) {
+      payload.text = replyText.trim();
+      if (replyEntities && replyEntities.length > 0) {
+        payload.entities = replyEntities;
+      }
+    }
+    return payload;
+  }
+
+  const trimmed = replyText?.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const payload: Payload = {
+    contentType: 'text',
+    text: trimmed,
+  };
+  if (replyEntities && replyEntities.length > 0) {
+    payload.entities = replyEntities;
+  }
+  return payload;
+};
+
+type WizardMode = 'once' | 'daily' | 'weekly';
+type WizardStep = 'mode' | 'datetime' | 'location';
+
+interface WizardSession {
+  chatId: number;
+  userId: number;
+  payload: Payload;
+  mode?: WizardMode;
+  step: WizardStep;
+  onceDate?: Date;
+  time?: { hour: number; minute: number };
+  dayOfWeek?: number;
+}
+
+const wizardSessions = new Map<string, WizardSession>();
+const getWizardSessionKey = (chatId: number, userId: number) => `${chatId}:${userId}`;
+const removeWizardSession = (chatId: number, userId: number) =>
+  wizardSessions.delete(getWizardSessionKey(chatId, userId));
+
+const buildWizardModeKeyboard = () =>
+  Markup.inlineKeyboard([
+    [Markup.button.callback('📅 Jednorazowo (data + godzina)', 'wizard:mode:once')],
+    [Markup.button.callback('⏰ Codziennie o godzinie', 'wizard:mode:daily')],
+    [Markup.button.callback('📆 Co tydzień (dzień + godzina)', 'wizard:mode:weekly')],
+    [Markup.button.callback('❌ Anuluj', 'wizard:cancel')],
+  ]);
+
+const buildLocationKeyboard = (hasChannel: boolean) => {
+  const rows = [
+    [Markup.button.callback('💬 Ten czat', 'wizard:location:current')],
+    [
+      Markup.button.callback(
+        hasChannel ? '📣 Kanał domyślny' : '📣 Kanał domyślny (nie ustawiony)',
+        'wizard:location:default',
+      ),
+    ],
+    [Markup.button.callback('❌ Anuluj', 'wizard:cancel')],
+  ];
+  return Markup.inlineKeyboard(rows);
+};
+
+const removeDiacritics = (value: string) => value.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+const normalizeWeekday = (value: string) =>
+  removeDiacritics(value.toLowerCase().replace(/\./g, ''));
+
+const WEEKDAY_ALIASES: Record<string, number> = (() => {
+  const groups: Array<[number, string[]]> = [
+    [0, ['sun', 'sunday', 'nie', 'niedziela', 'ndz']],
+    [1, ['mon', 'monday', 'pon', 'poniedzialek', 'poniedziałek', 'pn']],
+    [2, ['tue', 'tuesday', 'wt', 'wtorek']],
+    [3, ['wed', 'wednesday', 'sr', 'sroda', 'środa']],
+    [4, ['thu', 'thursday', 'czw', 'czwartek']],
+    [5, ['fri', 'friday', 'pt', 'piatek', 'piątek']],
+    [6, ['sat', 'saturday', 'sob', 'sobota']],
+  ];
+  const map: Record<string, number> = {};
+  for (const [day, aliases] of groups) {
+    for (const alias of aliases) {
+      map[removeDiacritics(alias.toLowerCase())] = day;
+    }
+  }
+  return map;
+})();
+
+const getDatetimePrompt = (mode: WizardMode) => {
+  switch (mode) {
+    case 'once':
+      return 'Podaj datę i godzinę w formacie DD.MM.RRRR HH:MM.';
+    case 'daily':
+      return 'Podaj godzinę w formacie HH:MM.';
+    case 'weekly':
+      return 'Podaj dzień tygodnia i godzinę w formacie DDD HH:MM (np. pt 18:00).';
+    default:
+      return 'Podaj datę i godzinę.';
+  }
+};
+
+const WIZARD_CALLBACK_PREFIX = 'wizard';
+
+const promptWizardMode = async (ctx: Context, session: WizardSession) => {
+  session.step = 'mode';
+  await replyWithTracking(ctx, 'Wybierz sposób harmonogramu:', 'wizard:mode_prompt', buildWizardModeKeyboard());
+};
+
+const promptWizardLocation = async (ctx: Context, session: WizardSession) => {
+  session.step = 'location';
+  const channelId = configStore.getMainChannelId();
+  const channelHint = channelId
+    ? ''
+    : '\nBrak skonfigurowanego kanału domyślnego. Użyj /set_channel, aby go ustawić.';
+  await replyWithTracking(
+    ctx,
+    `Gdzie publikować ten post?${channelHint}`,
+    'wizard:location_prompt',
+    buildLocationKeyboard(Boolean(channelId)),
+  );
+};
+
+const parseDateTimeDdMmYyyy = (value: string): Date | null => {
+  const match = value.trim().match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})\s+(\d{1,2}):(\d{2})$/);
+  if (!match) {
+    return null;
+  }
+  const [, dayStr, monthStr, yearStr, hourStr, minuteStr] = match;
+  const day = Number(dayStr);
+  const month = Number(monthStr);
+  const year = Number(yearStr);
+  const hour = Number(hourStr);
+  const minute = Number(minuteStr);
+  if (
+    Number.isNaN(day) ||
+    Number.isNaN(month) ||
+    Number.isNaN(year) ||
+    Number.isNaN(hour) ||
+    Number.isNaN(minute)
+  ) {
+    return null;
+  }
+  const date = new Date(year, month - 1, day, hour, minute, 0);
+  if (
+    date.getFullYear() !== year ||
+    date.getMonth() !== month - 1 ||
+    date.getDate() !== day ||
+    date.getHours() !== hour ||
+    date.getMinutes() !== minute
+  ) {
+    return null;
+  }
+  return date;
+};
+
+const parseWeeklyInput = (value: string): { dayOfWeek: number; hour: number; minute: number } | null => {
+  const match = value.trim().match(/^([^\s]+)\s+(\d{1,2}:\d{2})$/);
+  if (!match) {
+    return null;
+  }
+  const daySegment = match[1];
+  const timeSegment = match[2];
+  if (!daySegment || !timeSegment) {
+    return null;
+  }
+  const rawDay = normalizeWeekday(daySegment);
+  const dayOfWeek = WEEKDAY_ALIASES[rawDay];
+  if (dayOfWeek === undefined) {
+    return null;
+  }
+  const time = parseHHMM(timeSegment);
+  if (!time) {
+    return null;
+  }
+  return { dayOfWeek, hour: time.hour, minute: time.minute };
+};
+
+const buildCronFromSession = (session: WizardSession): { cron: string; repeat: RepeatMode; scheduledAt?: string } | null => {
+  if (!session.mode) {
+    return null;
+  }
+  if (session.mode === 'once') {
+    const { onceDate } = session;
+    if (!onceDate) {
+      return null;
+    }
+    const minute = onceDate.getMinutes();
+    const hour = onceDate.getHours();
+    const day = onceDate.getDate();
+    const month = onceDate.getMonth() + 1;
+    return {
+      cron: `0 ${minute} ${hour} ${day} ${month} *`,
+      repeat: 'none',
+      scheduledAt: onceDate.toISOString(),
+    };
+  }
+  const { time } = session;
+  if (!time) {
+    return null;
+  }
+  const minute = time.minute;
+  const hour = time.hour;
+  if (session.mode === 'daily') {
+    return {
+      cron: `0 ${minute} ${hour} * * *`,
+      repeat: 'daily',
+    };
+  }
+  if (session.mode === 'weekly' && typeof session.dayOfWeek === 'number') {
+    return {
+      cron: `0 ${minute} ${hour} * * ${session.dayOfWeek}`,
+      repeat: 'weekly',
+    };
+  }
+  return null;
+};
+
+const handleWizardText = async (ctx: Context): Promise<boolean> => {
+  const chatId = ctx.chat?.id;
+  const userId = ctx.from?.id;
+  const text = (ctx.message as { text?: string } | undefined)?.text?.trim();
+  if (!chatId || typeof userId !== 'number' || !text) {
+    return false;
+  }
+  const session = wizardSessions.get(getWizardSessionKey(chatId, userId));
+  if (!session || session.step !== 'datetime' || !session.mode) {
+    return false;
+  }
+  if (session.mode === 'once') {
+    const date = parseDateTimeDdMmYyyy(text);
+    if (!date) {
+      await replyWithTracking(
+        ctx,
+        'Niepoprawny format. Użyj DD.MM.RRRR HH:MM, np. 07.12.2025 18:30.',
+        'wizard:datetime:error',
+      );
+      return true;
+    }
+    if (date.getTime() <= Date.now()) {
+      await replyWithTracking(
+        ctx,
+        'Podana data musi być w przyszłości.',
+        'wizard:datetime:past',
+      );
+      return true;
+    }
+    session.onceDate = date;
+    session.time = { hour: date.getHours(), minute: date.getMinutes() };
+  } else if (session.mode === 'daily') {
+    const parsed = parseHHMM(text);
+    if (!parsed) {
+      await replyWithTracking(ctx, 'Niepoprawny format godziny. Użyj HH:MM.', 'wizard:datetime:error');
+      return true;
+    }
+    session.time = parsed;
+  } else if (session.mode === 'weekly') {
+    const parsed = parseWeeklyInput(text);
+    if (!parsed) {
+      await replyWithTracking(
+        ctx,
+        'Niepoprawny format. Użyj dzień tygodnia i HH:MM, np. pt 18:00.',
+        'wizard:datetime:error',
+      );
+      return true;
+    }
+    session.dayOfWeek = parsed.dayOfWeek;
+    session.time = { hour: parsed.hour, minute: parsed.minute };
+  }
+  await promptWizardLocation(ctx, session);
+  return true;
+};
+
+const handleWizardCallback = async (ctx: Context): Promise<boolean> => {
+  const callback = ctx.callbackQuery;
+  if (
+    !callback ||
+    !('data' in callback) ||
+    typeof callback.data !== 'string' ||
+    !callback.data.startsWith(`${WIZARD_CALLBACK_PREFIX}:`)
+  ) {
+    return false;
+  }
+  const chatId = ctx.chat?.id;
+  const userId = ctx.from?.id;
+  await ctx.answerCbQuery();
+  if (!chatId || typeof userId !== 'number') {
+    return true;
+  }
+  const sessionKey = getWizardSessionKey(chatId, userId);
+  const session = wizardSessions.get(sessionKey);
+  const [, action, mode] = callback.data.split(':');
+  if (action === 'cancel') {
+    removeWizardSession(chatId, userId);
+    await replyWithTracking(ctx, 'Kreator anulowany.', 'wizard:cancelled');
+    return true;
+  }
+  if (!session) {
+    await replyWithTracking(
+      ctx,
+      'Sesja kreatora wygasła. Napisz /wizard raz jeszcze.',
+      'wizard:expired',
+    );
+    return true;
+  }
+  if (action === 'mode') {
+    if (!mode) {
+      return true;
+    }
+    const normalized = mode as WizardMode;
+    session.mode = normalized;
+    session.step = 'datetime';
+    delete session.onceDate;
+    delete session.time;
+    delete session.dayOfWeek;
+    await replyWithTracking(
+      ctx,
+      getDatetimePrompt(normalized),
+      `wizard:prompt:${normalized}`,
+    );
+    return true;
+  }
+  if (action === 'location') {
+    if (session.step !== 'location') {
+      await replyWithTracking(
+        ctx,
+        'Najpierw wybierz tryb harmonogramu i podaj datę/godzinę.',
+        'wizard:location:error',
+      );
+      return true;
+    }
+    const target = mode;
+    const channelId = configStore.getMainChannelId();
+    if (target === 'default' && !channelId) {
+      await replyWithTracking(
+        ctx,
+        'Brak skonfigurowanego kanału domyślnego. Ustaw go przez /set_channel.',
+        'wizard:location:error',
+      );
+      return true;
+    }
+    const cronInfo = buildCronFromSession(session);
+    if (!cronInfo) {
+      await replyWithTracking(
+        ctx,
+        'Nie udało się przygotować harmonogramu. Spróbuj ponownie.',
+        'wizard:creation:error',
+      );
+      removeWizardSession(chatId, userId);
+      return true;
+    }
+    const ownerChatId = session.chatId;
+    const targetChatId = target === 'default' ? channelId! : ownerChatId;
+    try {
+      createScheduledJob(ownerChatId, targetChatId, cronInfo.cron, {
+        contentType: session.payload.contentType,
+        text: session.payload.text,
+        entities: session.payload.entities,
+        fileId: session.payload.fileId,
+      }, {
+        repeat: cronInfo.repeat,
+        scheduledAt: cronInfo.scheduledAt,
+        type: 'post',
+      });
+      await replyWithTracking(
+        ctx,
+        `Post zaplanowany.\nCron: <code>${cronInfo.cron}</code>`,
+        'wizard:scheduled',
+        { parse_mode: 'HTML' as const },
+      );
+    } catch (error: any) {
+      await replyWithTracking(
+        ctx,
+        `Nie udało się zaplanować posta: ${error?.message ?? error}`,
+        'wizard:scheduled:error',
+      );
+    }
+    removeWizardSession(chatId, userId);
+    return true;
+  }
+  return true;
+};
+
+const parseHHMM = (text: string): { hour: number; minute: number } | null => {
+  const m = text.trim().match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) {
+    return null;
+  }
+  const h = Number(m[1]);
+  const mm = Number(m[2]);
+  if (Number.isNaN(h) || Number.isNaN(mm) || h < 0 || h > 23 || mm < 0 || mm > 59) {
+    return null;
+  }
+  return { hour: h, minute: mm };
+};
+
+const parseDateTime = (
+  text: string,
+): { year: number; month: number; day: number; hour: number; minute: number } | null => {
+  const m = text.trim().match(/^(\d{4})-(\d{2})-(\d{2})\s+(\d{1,2}):(\d{2})$/);
+  if (!m) {
+    return null;
+  }
+  const year = Number(m[1]);
+  const month = Number(m[2]);
+  const day = Number(m[3]);
+  const hour = Number(m[4]);
+  const minute = Number(m[5]);
+  if (
+    month < 1 ||
+    month > 12 ||
+    day < 1 ||
+    day > 31 ||
+    hour < 0 ||
+    hour > 23 ||
+    minute < 0 ||
+    minute > 59
+  ) {
+    return null;
+  }
+  return { year, month, day, hour, minute };
 };
 
 const tryDeleteBotMessage = async (chatId: number, messageId: number) => {
@@ -437,6 +947,7 @@ bot.command('help', async (ctx) => {
       '/schedule – ustaw cron w czacie',
       '/schedule_channel – cron na kanał',
       '/test_post – testowy post',
+      '/wizard – prosty kreator harmonogramu (bez CRON-a, używaj jako reply)',
     ],
     zadania: ['/list_posts – lista postów', '/list_jobs – aktywne zadania'],
     kanal: ['/current_channel – pokaż kanał', '/set_channel – ustaw kanał'],
@@ -475,6 +986,48 @@ bot.command('help_inline', async (ctx) => {
 
 bot.command('cron_help', (ctx) => replyWithTracking(ctx, cronHelpMessage, 'cron_help'));
 
+bot.command('wizard', async (ctx) => {
+  const chatId = ctx.chat?.id;
+  const userId = ctx.from?.id;
+  if (!chatId || typeof userId !== 'number') {
+    return;
+  }
+  if (!(await isAdminCtx(ctx))) {
+    await replyWithTracking(
+      ctx,
+      'Nie masz uprawnień admina, żeby używać /wizard.',
+      'wizard:not_admin',
+    );
+    return;
+  }
+  const replyMessage = ctx.message?.reply_to_message;
+  if (!replyMessage) {
+    await replyWithTracking(
+      ctx,
+      'Użyj /wizard jako odpowiedzi (reply) na wiadomość z tekstem lub mediami, które chcesz zaplanować.',
+      'wizard:no_reply',
+    );
+    return;
+  }
+  const payload = extractPayloadFromMessage(replyMessage);
+  if (!payload) {
+    await replyWithTracking(
+      ctx,
+      'Nie udało się odczytać treści posta. Użyj tekstu, zdjęcia, wideo lub gifa.',
+      'wizard:payload_missing',
+    );
+    return;
+  }
+  const session: WizardSession = {
+    chatId,
+    userId,
+    payload,
+    step: 'mode',
+  };
+  wizardSessions.set(getWizardSessionKey(chatId, userId), session);
+  await promptWizardMode(ctx, session);
+});
+
 bot.action('help:basic', async (ctx) => {
   await ctx.answerCbQuery();
   const text =
@@ -496,12 +1049,33 @@ bot.action('help:plan', async (ctx) => {
     '<code>/schedule "*/30 * * * * *" To idzie co 30 sekund w tym czacie</code>\n\n' +
     '<b>/schedule_channel "CRON"</b> (reply do wiadomości z treścią)\n' +
     '– planuje publikację na USTAWIONYM kanale.\n\n' +
+    '<b>/wizard</b> – prosty kreator harmonogramu bez CRON-a (użyj jako reply).\n\n' +
+    '<b>Planowanie bez CRON</b>\n' +
+    '– Odpowiedz na wiadomość z treścią, uruchom /wizard i podaj tryb oraz godzinę.\n\n' +
     '<b>Instrukcje:</b>\n' +
     '- CRON ma 6 pól: <code>sekunda minuta godzina dzień miesiąc dzień_tygodnia</code>\n' +
     '- np. <code>*/10 * * * * *</code> – co 10 sekund\n' +
     '- np. <code>0 */5 * * * *</code> – co 5 minut';
   const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback('🧙‍♂️ Kreator /wizard', 'help:wizard')],
     [Markup.button.callback('📑 Zadania CRON', 'help:jobs')],
+    [Markup.button.callback('⬅️ Wróć do menu', 'help:back')],
+  ]);
+  await safeEditHelpMessage(ctx, text, keyboard);
+});
+
+bot.action('help:wizard', async (ctx) => {
+  await ctx.answerCbQuery();
+  const text =
+    '🧙‍♂️ <b>Kreator /wizard</b>\n\n' +
+    '1) Napisz post (tekst lub media z podpisem) i pozostaw go jako zwykłą wiadomość.\n' +
+    '2) Odpowiedz na ten post, wpisz /wizard i wybierz tryb harmonogramu.\n' +
+    '3) Wybierz, czy post ma być jednorazowy, codzienny czy tygodniowy.\n' +
+    '4) Wskaż, gdzie publikować (ten czat lub kanał domyślny).\n' +
+    '5) Podaj godzinę lub datę zgodnie z zaproponowanym formatem.\n' +
+    '6) Gotowe zadania pojawią się w /list_jobs i /list_posts.';
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback('🕒 Planowanie', 'help:plan')],
     [Markup.button.callback('⬅️ Wróć do menu', 'help:back')],
   ]);
   await safeEditHelpMessage(ctx, text, keyboard);
@@ -945,40 +1519,12 @@ bot.command('schedule', async (ctx) => {
   const targetChatId = ownerChatId;
 
   try {
-    let createdJobId: number | null = null;
-    const job = new CronJob(
-      cronExpr,
-      async () => {
-        try {
-          if (createdJobId === null) {
-            return;
-          }
-          const jobData = jobStore.getJob(ownerChatId, createdJobId);
-          if (!jobData) {
-            return;
-          }
-          await sendScheduledJobContent(jobData);
-        } catch (cronError) {
-          console.error('Nie udało się wysłać zaplanowanej wiadomości.', cronError);
-        }
-      },
-      null,
-      true,
-      'Europe/Warsaw',
-    );
-
-    const jobRecord = jobStore.addJob({
-      ownerChatId,
-      targetChatId,
-      cronExpr,
+    const jobRecord = createScheduledJob(ownerChatId, targetChatId, cronExpr, {
       contentType,
       text: jobText,
       fileId,
       entities: jobEntities,
-      job,
     });
-    createdJobId = jobRecord.id;
-    job.start();
     const contentLabel = describeJobContent(jobRecord.contentType);
     return replyWithTracking(
       ctx,
@@ -1035,40 +1581,12 @@ bot.command('schedule_channel', async (ctx) => {
   }
 
   try {
-    let createdJobId: number | null = null;
-    const job = new CronJob(
-      cronExpr,
-      async () => {
-        try {
-          if (createdJobId === null) {
-            return;
-          }
-          const jobData = jobStore.getJob(ownerChatId, createdJobId);
-          if (!jobData) {
-            return;
-          }
-          await sendScheduledJobContent(jobData);
-        } catch (cronError) {
-          console.error('Nie udało się wysłać zaplanowanej wiadomości na kanał.', cronError);
-        }
-      },
-      null,
-      true,
-      'Europe/Warsaw',
-    );
-
-    const jobRecord = jobStore.addJob({
-      ownerChatId,
-      targetChatId: channelId,
-      cronExpr,
+    const jobRecord = createScheduledJob(ownerChatId, channelId, cronExpr, {
       contentType,
       text: jobText,
       fileId,
       entities: jobEntities,
-      job,
     });
-    createdJobId = jobRecord.id;
-    job.start();
     const contentLabel = describeJobContent(jobRecord.contentType);
     const replyModeNote =
       isReplyTextMode && hasProvidedMessage
@@ -1081,6 +1599,115 @@ bot.command('schedule_channel', async (ctx) => {
     );
   } catch (e: any) {
     return replyWithTracking(ctx, `Błąd crona: ${e?.message ?? e}`, 'schedule_channel:error');
+  }
+});
+
+const DAY_OF_WEEK_MAP: Record<string, number> = {
+  mon: 1,
+  tue: 2,
+  wed: 3,
+  thu: 4,
+  fri: 5,
+  sat: 6,
+  sun: 0,
+};
+
+bot.command('wizard_channel', async (ctx) => {
+  const replyMessage = ctx.message?.reply_to_message;
+  if (!replyMessage) {
+    await ctx.reply('Użyj /wizard_channel jako reply na wiadomość z postem.');
+    return;
+  }
+  const payload = extractPayloadFromMessage(replyMessage);
+  if (!payload) {
+    await ctx.reply('Nie udało się odczytać treści posta. Użyj tekstu, zdjęcia, wideo lub gifa.');
+    return;
+  }
+  const channelId = configStore.getMainChannelId();
+  if (!channelId) {
+    await ctx.reply('Kanał główny nie jest ustawiony. Użyj /set_channel, aby go zapisać.');
+    return;
+  }
+  const text = ctx.message?.text?.trim() ?? '';
+  const onceMatch = text.match(
+    /^\/wizard_channel(?:@\w+)?\s+once\s+(\d{4}-\d{2}-\d{2})\s+(\d{1,2}:\d{2})$/i,
+  );
+  const dailyMatch = text.match(/^\/wizard_channel(?:@\w+)?\s+daily\s+(\d{1,2}:\d{2})$/i);
+  const weeklyMatch = text.match(
+    /^\/wizard_channel(?:@\w+)?\s+weekly\s+([A-Za-z]{3})\s+(\d{1,2}:\d{2})$/i,
+  );
+  let cronExpr: string | null = null;
+  if (onceMatch) {
+    const [, datePart, timePart] = onceMatch;
+    if (!datePart || !timePart) {
+      await ctx.reply('Niepoprawny format daty. Użyj RRRR-MM-DD HH:MM.');
+      return;
+    }
+    const parsed = parseDateTime(`${datePart} ${timePart}`);
+    if (!parsed) {
+      await ctx.reply('Niepoprawny format daty. Użyj RRRR-MM-DD HH:MM.');
+      return;
+    }
+    cronExpr = `0 ${parsed.minute} ${parsed.hour} ${parsed.day} ${parsed.month} *`;
+  } else if (dailyMatch) {
+    const [, timePart] = dailyMatch;
+    if (!timePart) {
+      await ctx.reply('Niepoprawny format godziny. Użyj HH:MM.');
+      return;
+    }
+    const parsed = parseHHMM(timePart);
+    if (!parsed) {
+      await ctx.reply('Niepoprawny format godziny. Użyj HH:MM.');
+      return;
+    }
+    cronExpr = `0 ${parsed.minute} ${parsed.hour} * * *`;
+  } else if (weeklyMatch) {
+    const [, daySpec, timePart] = weeklyMatch;
+    if (!daySpec || !timePart) {
+      await ctx.reply('Niepoprawny format. Użyj weekly DDD HH:MM.');
+      return;
+    }
+    const dayKey = daySpec.toLowerCase();
+    const dayNumber = DAY_OF_WEEK_MAP[dayKey];
+    if (typeof dayNumber !== 'number') {
+      await ctx.reply('Niepoprawny dzień tygodnia. Użyj mon/tue/wed/thu/fri/sat/sun.');
+      return;
+    }
+    const parsed = parseHHMM(timePart);
+    if (!parsed) {
+      await ctx.reply('Niepoprawny format godziny. Użyj HH:MM.');
+      return;
+    }
+    cronExpr = `0 ${parsed.minute} ${parsed.hour} * * ${dayNumber}`;
+  } else {
+    await ctx.reply(
+      'Niepoprawna składnia. Użyj:\n/wizard_channel once RRRR-MM-DD HH:MM\n/wizard_channel daily HH:MM\n/wizard_channel weekly DDD HH:MM',
+    );
+    return;
+  }
+
+  if (!cronExpr) {
+    return;
+  }
+  const finalCronExpr = cronExpr;
+  try {
+    const ownerChatId = ctx.chat?.id;
+    if (typeof ownerChatId !== 'number') {
+      await ctx.reply('Nie udało się ustalić czatu.');
+      return;
+    }
+    const jobRecord = createScheduledJob(ownerChatId, channelId, cronExpr, {
+      contentType: payload.contentType,
+      text: payload.text,
+      entities: payload.entities,
+      fileId: payload.fileId,
+    });
+    await ctx.reply(
+      `OK, zaplanowano post na kanał.\nCron: <code>${cronExpr}</code>`,
+      { parse_mode: 'HTML' },
+    );
+  } catch (error: any) {
+    await ctx.reply(`Nie udało się zaplanować posta: ${error?.message ?? error}`);
   }
 });
 
@@ -1189,6 +1816,9 @@ bot.command('cancel_job', (ctx) => {
 });
 
 bot.on('callback_query', async (ctx) => {
+  if (await handleWizardCallback(ctx)) {
+    return;
+  }
   const callback = ctx.callbackQuery;
   if (!('data' in callback) || !callback.data) {
     await ctx.answerCbQuery('Brak danych przycisku.');
@@ -1335,6 +1965,9 @@ bot.on('callback_query', async (ctx) => {
 });
 
 bot.on('text', async (ctx, next?: () => Promise<void>) => {
+  if (await handleWizardText(ctx)) {
+    return;
+  }
   const callNext = () => (next ? next() : Promise.resolve());
   const chatId = ctx.chat?.id;
   const userId = ctx.from?.id;
