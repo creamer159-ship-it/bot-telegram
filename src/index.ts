@@ -18,18 +18,29 @@ const bot = new Telegraf(token);
 const isPanelEnabled = process.env.START_PANEL === 'true';
 
 
-const telegramMenuCommands = [
-  { command: 'ping', description: 'Sprawdzenie czy bot działa' },
-  { command: 'schedule', description: 'Utwórz zadanie cron w czacie' },
-  { command: 'schedule_channel', description: 'Utwórz zadanie cron na kanał' },
-  { command: 'test_post', description: 'Wyślij testowy post' },
+const BOT_COMMANDS = [
+  { command: 'ping', description: 'Sprawdź czy bot działa' },
+
+  // Planowanie
+  { command: 'schedule', description: 'Cron: wysyłaj w czacie' },
+  { command: 'schedule_channel', description: 'Cron: wysyłaj na kanał' },
+  { command: 'test_post', description: 'Wyślij post testowy' },
+
+  // Posty / zadania
   { command: 'list_posts', description: 'Lista zaplanowanych postów' },
-  { command: 'list_jobs', description: 'Lista aktywnych zadań cron' },
-  { command: 'list_admins', description: 'Wyświetl listę adminów' },
-  { command: 'add_admin', description: 'Dodaj admina (reply lub ID)' },
-  { command: 'remove_admin', description: 'Usuń admina (reply lub ID)' },
-  { command: 'current_channel', description: 'Pokaż ustawiony kanał' },
+  { command: 'list_jobs', description: 'Aktywne zadania cron' },
+
+  // Kanał
+  { command: 'current_channel', description: 'Pokaż kanał' },
   { command: 'set_channel', description: 'Ustaw kanał (reply lub ID)' },
+
+  // Admini
+  { command: 'list_admins', description: 'Wyświetl adminów' },
+  { command: 'add_admin', description: 'Dodaj admina (reply/ID)' },
+  { command: 'remove_admin', description: 'Usuń admina (reply/ID)' },
+
+  // System / debug
+  { command: 'debug_config', description: 'Podgląd konfiguracji bota' },
 ];
 
 type ReplyOptions = Parameters<Context['reply']>[1];
@@ -335,23 +346,6 @@ const tryEditBotMessage = async (chatId: number, messageId: number, newText: str
   }
 };
 
-const helpMessage = [
-  'Dostępne komendy:',
-  '/ping – test działania',
-  '/schedule – ustaw cron w czacie',
-  '/schedule_channel – cron na kanał',
-  '/test_post – testowy post',
-  '/list_posts – lista postów',
-  '/list_jobs – lista zadań',
-  '',
-  'Komendy administratora:',
-  '/list_admins – lista adminów',
-  '/add_admin – dodaj admina (reply lub ID)',
-  '/remove_admin – usuń admina (reply lub ID)',
-  '/current_channel – aktualny kanał',
-  '/set_channel – zmień kanał',
-].join('\n');
-
 const cronHelpMessage = [
   '⏱️ Jak pisać CRON (6 pól)?',
   'Format: sekunda | minuta | godzina | dzień_miesiąca | miesiąc | dzień_tygodnia',
@@ -386,7 +380,43 @@ const cronHelpMessage = [
 // /ping — szybki test działania
 bot.command('ping', (ctx) => replyWithTracking(ctx, 'pong', 'ping'));
 
-bot.command('help', (ctx) => replyWithTracking(ctx, helpMessage, 'help'));
+bot.command('help', async (ctx) => {
+  const isAdminUser = configStore.isAdmin(ctx.from?.id ?? 0);
+  const sections = {
+    podstawowe: ['/ping – sprawdź czy bot działa'],
+    planowanie: [
+      '/schedule – ustaw cron w czacie',
+      '/schedule_channel – cron na kanał',
+      '/test_post – testowy post',
+    ],
+    zadania: ['/list_posts – lista postów', '/list_jobs – aktywne zadania'],
+    kanal: ['/current_channel – pokaż kanał', '/set_channel – ustaw kanał'],
+    admin: ['/list_admins – lista adminów', '/add_admin – dodaj admina', '/remove_admin – usuń admina'],
+    debug: ['/debug_config – podgląd konfiguracji'],
+  };
+
+  let msg =
+    '✨ <b>Pomoc – dostępne komendy</b>\n\n' +
+    '📌 <b>Podstawowe</b>\n' +
+    sections.podstawowe.join('\n') +
+    '\n\n' +
+    '🕒 <b>Planowanie postów</b>\n' +
+    sections.planowanie.join('\n') +
+    '\n\n' +
+    '📑 <b>Zadania</b>\n' +
+    sections.zadania.join('\n') +
+    '\n\n' +
+    '📢 <b>Kanał</b>\n' +
+    sections.kanal.join('\n') +
+    '\n\n';
+
+  if (isAdminUser) {
+    msg += '🛡 <b>Administracja</b>\n' + sections.admin.join('\n') + '\n\n';
+  }
+
+  msg += '🔧 <b>Debug / system</b>\n' + sections.debug.join('\n');
+  await ctx.reply(msg, { parse_mode: 'HTML' });
+});
 
 bot.command('cron_help', (ctx) => replyWithTracking(ctx, cronHelpMessage, 'cron_help'));
 
@@ -1214,7 +1244,7 @@ const shutdown = async (signal: 'SIGINT' | 'SIGTERM') => {
 };
 
 const main = async () => {
-  await bot.telegram.setMyCommands(telegramMenuCommands);
+  await bot.telegram.setMyCommands(BOT_COMMANDS);
   await bot.launch();
   console.log('Bot działa.');
 
