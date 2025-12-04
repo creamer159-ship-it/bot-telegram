@@ -2,6 +2,8 @@ import type { Message } from 'telegraf/typings/core/types/typegram';
 
 export type StoredMessageSource = string;
 
+export type StoredMessageContentType = 'text' | 'photo' | 'video' | 'animation' | 'document' | 'other';
+
 export interface StoredMessage {
   messageId: number;
   chatId: number;
@@ -9,6 +11,8 @@ export interface StoredMessage {
   source: StoredMessageSource;
   sentAt: Date;
   deleted: boolean;
+  contentType: StoredMessageContentType;
+  fileId?: string;
 }
 
 class MessageStore {
@@ -81,21 +85,93 @@ class MessageStore {
     source: StoredMessageSource,
   ): void {
     const sentAtSeconds = message.date ?? Math.floor(Date.now() / 1000);
+    const { contentType, fileId } = determineContent(message);
     const textContent =
       'text' in message && typeof message.text === 'string'
         ? message.text
         : 'caption' in message && typeof message.caption === 'string'
           ? message.caption
           : '';
-    this.add({
+    const payload: Omit<StoredMessage, 'deleted'> = {
       messageId: message.message_id,
       chatId: message.chat.id,
       text: textContent,
       source,
       sentAt: new Date(sentAtSeconds * 1000),
-    });
+      contentType,
+    };
+    if (fileId) {
+      payload.fileId = fileId;
+    }
+    this.add(payload);
+  }
+
+  updateContent(
+    chatId: number,
+    messageId: number,
+    updates: {
+      text?: string;
+      contentType?: StoredMessageContentType;
+      fileId?: string | undefined;
+    },
+  ): boolean {
+    const message = this.get(chatId, messageId);
+    if (!message) {
+      return false;
+    }
+    if (updates.text !== undefined) {
+      message.text = updates.text;
+    }
+    if (updates.contentType !== undefined) {
+      message.contentType = updates.contentType;
+    }
+    if (Object.prototype.hasOwnProperty.call(updates, 'fileId')) {
+      if (updates.fileId === undefined) {
+        delete message.fileId;
+      } else {
+        message.fileId = updates.fileId;
+      }
+    }
+    return true;
   }
 }
+
+interface MessageContentInfo {
+  contentType: StoredMessageContentType;
+  fileId?: string;
+}
+
+const determineContent = (message: Message): MessageContentInfo => {
+  if ('text' in message && typeof message.text === 'string') {
+    return { contentType: 'text' };
+  }
+  const photos = 'photo' in message ? message.photo : undefined;
+  if (photos && photos.length > 0) {
+    const lastPhoto = photos[photos.length - 1];
+    if (lastPhoto?.file_id) {
+      return { contentType: 'photo', fileId: lastPhoto.file_id };
+    }
+  }
+  if ('video' in message) {
+    const video = message.video;
+    if (video && video.file_id) {
+      return { contentType: 'video', fileId: video.file_id };
+    }
+  }
+  if ('animation' in message) {
+    const animation = message.animation;
+    if (animation && animation.file_id) {
+      return { contentType: 'animation', fileId: animation.file_id };
+    }
+  }
+  if ('document' in message) {
+    const document = message.document;
+    if (document && document.file_id) {
+      return { contentType: 'document', fileId: document.file_id };
+    }
+  }
+  return { contentType: 'other' };
+};
 
 const messageStore = new MessageStore();
 export default messageStore;

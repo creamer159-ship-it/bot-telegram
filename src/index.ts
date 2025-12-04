@@ -2,7 +2,13 @@ import 'dotenv/config';
 import { CronJob } from 'cron';
 import { Markup, Telegraf } from 'telegraf';
 import type { Context } from 'telegraf';
-import type { Message as TelegramMessage, MessageEntity } from 'telegraf/types';
+import type {
+  InputMediaAnimation,
+  InputMediaPhoto,
+  InputMediaVideo,
+  Message as TelegramMessage,
+  MessageEntity,
+} from 'telegraf/types';
 import editSessionStore from './editSessionStore.js';
 import jobStore, {
   type JobContentType,
@@ -12,6 +18,7 @@ import jobStore, {
 } from './jobStore.js';
 import messageStore, { type StoredMessage } from './messageStore.js';
 import configStore, { isProd } from './configStore.js';
+import sessionStore, { type SessionState } from './sessionStore.js';
 import { startPanelServer } from './panelServer.js';
 const token = process.env.BOT_TOKEN;
 if (!token) {
@@ -981,6 +988,8 @@ const wizardHelpText = [
   '',
   '<b>Jednorazowy</b> → <code>DD.MM.YYYY HH:MM</code>',
   'Przykład: <code>07.12.2025 18:30</code>',
+  '',
+  '✏️ <b>Edycja postów</b> – otwórz <code>/list_posts</code>, kliknij Edytuj i wyślij nową treść.',
 ].join('\n');
 
 // /ping — szybki test działania
@@ -1459,7 +1468,7 @@ bot.command('list_posts', async (ctx) => {
       reply_markup: {
         inline_keyboard: [
           [
-            { text: '✏️ Edytuj', callback_data: `edit:${message.messageId}` },
+            { text: '✏️ Edytuj post', callback_data: `postedit:${message.messageId}` },
             { text: '🗑 Usuń', callback_data: `delete:${message.messageId}` },
           ],
         ],
@@ -1917,6 +1926,22 @@ bot.on('callback_query', async (ctx) => {
     return;
   }
 
+  if (action === 'postedit') {
+    if (!userId) {
+      await ctx.answerCbQuery('Brak użytkownika.');
+      return;
+    }
+    if (!(await requireAdmin(ctx, { notify: false }))) {
+      await ctx.answerCbQuery('Brak uprawnień admina.', { show_alert: true });
+      return;
+    }
+    sessionStore.set(chatId, userId, { mode: 'edit_post', postId: targetId });
+    await ctx.answerCbQuery('Przygotowuję edycję posta...');
+    await replyWithTracking(ctx, 'Wyślij nową treść posta (tekst lub caption).', 'postedit:prompt');
+    await ctx.editMessageReplyMarkup(undefined).catch(() => undefined);
+    return;
+  }
+
   if (action === 'delete') {
     await ctx.answerCbQuery('Usuwam wiadomość...');
     const result = await tryDeleteBotMessage(chatId, targetId);
@@ -1997,7 +2022,182 @@ bot.on('callback_query', async (ctx) => {
   await ctx.answerCbQuery('Nieznana akcja.');
 });
 
-bot.on('text', async (ctx, next?: () => Promise<void>) => {
+type EditableMediaType = 'photo' | 'video' | 'animation';
+
+type IncomingPostContent =
+  | { type: 'text'; text: string }
+  | { type: 'media'; mediaType: EditableMediaType; fileId: string; caption?: string };
+
+const getIncomingPostContent = (message?: TelegramMessage): IncomingPostContent | null => {
+  if (!message) {
+    return null;
+  }
+  const text =
+    'text' in message && typeof message.text === 'string' ? message.text.trim() : '';
+  if (text) {
+    return { type: 'text', text };
+  }
+  const caption =
+    'caption' in message && typeof message.caption === 'string' ? message.caption.trim() : undefined;
+  const photos = 'photo' in message ? message.photo : undefined;
+  if (photos && photos.length > 0) {
+    const lastPhoto = photos[photos.length - 1];
+    if (lastPhoto?.file_id) {
+      const captionField = caption ? { caption } : {};
+      return {
+        type: 'media',
+        mediaType: 'photo',
+        fileId: lastPhoto.file_id,
+        ...captionField,
+      };
+    }
+  }
+  const video = 'video' in message ? message.video : undefined;
+  if (video && video.file_id) {
+    const captionField = caption ? { caption } : {};
+    return {
+      type: 'media',
+      mediaType: 'video',
+      fileId: video.file_id,
+      ...captionField,
+    };
+  }
+  const animation = 'animation' in message ? message.animation : undefined;
+  if (animation && animation.file_id) {
+    const captionField = caption ? { caption } : {};
+    return {
+      type: 'media',
+      mediaType: 'animation',
+      fileId: animation.file_id,
+      ...captionField,
+    };
+  }
+  return null;
+};
+
+const getMessagePlainText = (message?: TelegramMessage): string | undefined => {
+  if (!message) {
+    return undefined;
+  }
+  if ('text' in message && typeof message.text === 'string') {
+    return message.text;
+  }
+  return undefined;
+};
+
+const isEditableMediaType = (type: StoredMessage['contentType']): type is EditableMediaType =>
+  type === 'photo' || type === 'video' || type === 'animation';
+
+const buildInputMedia = (
+  mediaType: EditableMediaType,
+  fileId: string,
+  caption?: string,
+): InputMediaPhoto | InputMediaVideo | InputMediaAnimation => {
+  const trimmedCaption = caption?.trim();
+  const captionField = trimmedCaption ? { caption: trimmedCaption } : {};
+  if (mediaType === 'photo') {
+    return { type: 'photo', media: fileId, ...captionField };
+  }
+  if (mediaType === 'video') {
+    return { type: 'video', media: fileId, ...captionField };
+  }
+  return { type: 'animation', media: fileId, ...captionField };
+};
+
+const handlePostEditSubmission = async (
+  ctx: Context,
+  chatId: number,
+  userId: number,
+  session: SessionState,
+): Promise<boolean> => {
+  const storedMessage = messageStore.get(chatId, session.postId);
+  if (!storedMessage || storedMessage.deleted) {
+    await replyWithTracking(ctx, 'Nie znaleziono posta do edycji.', 'postedit:not_found');
+    sessionStore.clear(chatId, userId);
+    return true;
+  }
+  const incomingContent = getIncomingPostContent(ctx.message);
+  if (!incomingContent) {
+    await replyWithTracking(
+      ctx,
+      'Wyślij nową treść posta (tekst lub caption ze zdjęcia/wideo).',
+      'postedit:invalid',
+    );
+    return true;
+  }
+
+  if (storedMessage.contentType === 'text') {
+    if (incomingContent.type !== 'text') {
+      await replyWithTracking(
+        ctx,
+        'Ten post zawiera tylko tekst. Wyślij nowy tekst.',
+        'postedit:type_mismatch',
+      );
+      return true;
+    }
+    const result = await tryEditBotMessage(chatId, storedMessage.messageId, incomingContent.text);
+    sessionStore.clear(chatId, userId);
+    if (result.success) {
+      await replyWithTracking(ctx, '✔ Post zaktualizowany.', 'postedit:confirmation');
+    } else {
+      await replyWithTracking(
+        ctx,
+        `Nie udało się zaktualizować posta. ${result.message}`,
+        'postedit:error',
+      );
+    }
+    return true;
+  }
+
+  if (!isEditableMediaType(storedMessage.contentType)) {
+    await replyWithTracking(
+      ctx,
+      'Ten typ posta nie może być edytowany przez kreatora.',
+      'postedit:unsupported',
+    );
+    sessionStore.clear(chatId, userId);
+    return true;
+  }
+
+  if (
+    incomingContent.type !== 'media' ||
+    incomingContent.mediaType !== storedMessage.contentType
+  ) {
+    await replyWithTracking(
+      ctx,
+      'Ten post zawiera media. Wyślij zdjęcie, wideo lub gif tego samego typu wraz z caption.',
+      'postedit:type_mismatch',
+    );
+    return true;
+  }
+
+  const media = buildInputMedia(
+    incomingContent.mediaType,
+    incomingContent.fileId,
+    incomingContent.caption,
+  );
+  try {
+    await ctx.telegram.editMessageMedia(chatId, storedMessage.messageId, undefined, media);
+    messageStore.updateContent(chatId, storedMessage.messageId, {
+      text: incomingContent.caption?.trim() ?? '',
+      contentType: storedMessage.contentType,
+      fileId: incomingContent.fileId,
+    });
+    sessionStore.clear(chatId, userId);
+    await replyWithTracking(ctx, '✔ Post zaktualizowany.', 'postedit:confirmation');
+  } catch (error) {
+    console.error('Nie udało się edytować posta (media).', error);
+    sessionStore.clear(chatId, userId);
+    await replyWithTracking(
+      ctx,
+      'Nie udało się zaktualizować posta. Spróbuj ponownie.',
+      'postedit:error',
+    );
+  }
+  return true;
+};
+
+bot.on('message', async (ctx, next?: () => Promise<void>) => {
   if (await handleWizardText(ctx)) {
     return;
   }
@@ -2008,12 +2208,18 @@ bot.on('text', async (ctx, next?: () => Promise<void>) => {
     return callNext();
   }
 
+  const postSession = sessionStore.get(chatId, userId);
+  if (postSession?.mode === 'edit_post') {
+    await handlePostEditSubmission(ctx, chatId, userId, postSession);
+    return;
+  }
+
   const session = editSessionStore.get(chatId, userId);
   if (!session) {
     return callNext();
   }
 
-  const newText = ctx.message?.text?.trim();
+  const newText = getMessagePlainText(ctx.message)?.trim();
   if (!newText) {
     editSessionStore.clear(chatId, userId);
     await replyWithTracking(

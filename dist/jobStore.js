@@ -69,6 +69,9 @@ class JobStore {
             text: params.text,
             fileId: params.fileId,
             entities: params.entities,
+            scheduledAt: params.scheduledAt,
+            repeat: params.repeat,
+            type: params.type,
             job: params.job,
         };
         const ownerJobs = this.jobsByOwner.get(params.ownerChatId) ?? new Map();
@@ -94,6 +97,26 @@ class JobStore {
         }
         jobRecord.text = text;
         jobRecord.entities = undefined;
+        this.persistState();
+        return jobRecord;
+    }
+    updateJobContent(jobId, updates) {
+        const jobRecord = this.getJobById(jobId);
+        if (!jobRecord) {
+            return undefined;
+        }
+        if (updates.contentType) {
+            jobRecord.contentType = updates.contentType;
+        }
+        if ('text' in updates) {
+            jobRecord.text = updates.text;
+        }
+        if ('entities' in updates) {
+            jobRecord.entities = updates.entities;
+        }
+        if ('fileId' in updates) {
+            jobRecord.fileId = updates.fileId;
+        }
         this.persistState();
         return jobRecord;
     }
@@ -137,7 +160,7 @@ class JobStore {
         }
         return undefined;
     }
-    async updateCron(jobId, cronExpr) {
+    async updateCron(jobId, cronExpr, metadata = {}) {
         const jobRecord = this.getJobById(jobId);
         if (!jobRecord) {
             return undefined;
@@ -158,6 +181,12 @@ class JobStore {
             }
         }
         jobRecord.cronExpr = cronExpr;
+        if (metadata.scheduledAt !== undefined) {
+            jobRecord.scheduledAt = metadata.scheduledAt;
+        }
+        if (metadata.repeat !== undefined) {
+            jobRecord.repeat = metadata.repeat;
+        }
         this.persistState();
         return jobRecord;
     }

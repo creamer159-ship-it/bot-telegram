@@ -1,5 +1,6 @@
 import type { Message } from 'telegraf/typings/core/types/typegram';
 export type StoredMessageSource = string;
+export type StoredMessageContentType = 'text' | 'photo' | 'video' | 'animation' | 'document' | 'other';
 export interface StoredMessage {
     messageId: number;
     chatId: number;
@@ -7,6 +8,8 @@ export interface StoredMessage {
     source: StoredMessageSource;
     sentAt: Date;
     deleted: boolean;
+    contentType: StoredMessageContentType;
+    fileId?: string;
 }
 declare class MessageStore {
     private readonly store;
@@ -19,6 +22,11 @@ declare class MessageStore {
     getMessagesForChat(chatId: number, limit?: number): StoredMessage[];
     getAllMessagesForChat(chatId: number): StoredMessage[];
     recordTelegramMessage(message: Message.TextMessage | Message.PhotoMessage | Message.VideoMessage | Message.AnimationMessage | Message.DocumentMessage, source: StoredMessageSource): void;
+    updateContent(chatId: number, messageId: number, updates: {
+        text?: string;
+        contentType?: StoredMessageContentType;
+        fileId?: string | undefined;
+    }): boolean;
 }
 declare const messageStore: MessageStore;
 export default messageStore;
