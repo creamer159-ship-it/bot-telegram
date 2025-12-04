@@ -1005,7 +1005,11 @@ bot.command('help', async (ctx) => {
       '/test_post – testowy post',
       '/wizard – prosty kreator harmonogramu (bez CRON-a, używaj jako reply; szczegóły w /help_wizard)',
     ],
-    zadania: ['/list_posts – lista postów', '/list_jobs – aktywne zadania'],
+    zadania: [
+      '/list_posts – lista postów',
+      '/list_jobs – aktywne zadania',
+      '/edit – edytuj istniejący post (użyj jako odpowiedzi na wiadomość)',
+    ],
     kanal: ['/current_channel – pokaż kanał', '/set_channel – ustaw kanał'],
     admin: ['/list_admins – lista adminów', '/add_admin – dodaj admina', '/remove_admin – usuń admina'],
     debug: ['/debug_config – podgląd konfiguracji'],
