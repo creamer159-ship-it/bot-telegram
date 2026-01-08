@@ -42,7 +42,7 @@ const BOT_COMMANDS = [
   // Posty / zadania
   { command: 'list_posts', description: 'Lista zaplanowanych postów' },
   { command: 'list_jobs', description: 'Aktywne zadania cron' },
-  { command: 'stats', description: 'Podsumowanie zadań i prostych statystyk' },
+  { command: 'stats', description: 'Statystyki zadań i publikacji' },
 
   // Kanał
   { command: 'current_channel', description: 'Pokaż kanał' },
@@ -134,6 +134,7 @@ const buildHelpMenuPayload = (isAdmin: boolean) => {
     [Markup.button.callback('📌 Podstawowe', 'help:basic')],
     [Markup.button.callback('🕒 Planowanie', 'help:plan')],
     [Markup.button.callback('📑 Zadania CRON', 'help:jobs')],
+    [Markup.button.callback('📊 /stats', 'help:stats')],
     [Markup.button.callback('📢 Kanał', 'help:channel')],
   ];
   if (isAdmin) {
@@ -1058,6 +1059,12 @@ const wizardHelpText = [
   '✏️ <b>Edycja postów</b> – otwórz <code>/list_posts</code>, kliknij Edytuj i wyślij nową treść.',
 ].join('\n');
 
+const statsHelpText =
+  '✨ <b>Statystyki zadań</b>\n\n' +
+  '/stats – statystyki zadań (ile aktywnych, rozkład godzin/dni, najbliższe zadanie).\n' +
+  'Raport widoczny tylko dla adminów, oparty na cronExpr i zaplanowanych nextRunAt.\n\n' +
+  'Użyj: /stats';
+
 // /ping — szybki test działania
 bot.command('ping', (ctx) => replyWithTracking(ctx, 'pong', 'ping'));
 
@@ -1074,7 +1081,7 @@ bot.command('help', async (ctx) => {
     zadania: [
       '/list_posts – lista postów',
       '/list_jobs – aktywne zadania',
-      '/stats – podsumowanie zadań i prostych statystyk',
+      '/stats – statystyki zadań (ile aktywnych, rozkład godzin/dni, najbliższe zadanie)',
       '/edit – edytuj istniejący post (użyj jako odpowiedzi na wiadomość)',
     ],
     kanal: ['/current_channel – pokaż kanał', '/set_channel – ustaw kanał'],
@@ -1206,6 +1213,12 @@ bot.action('help:jobs', async (ctx) => {
     [Markup.button.callback('⬅️ Wróć do menu', 'help:back')],
   ]);
   await safeEditHelpMessage(ctx, text, keyboard);
+});
+
+bot.action('help:stats', async (ctx) => {
+  await ctx.answerCbQuery();
+  const keyboard = Markup.inlineKeyboard([[Markup.button.callback('⬅️ Wróć do menu', 'help:back')]]);
+  await safeEditHelpMessage(ctx, statsHelpText, keyboard);
 });
 
 bot.action('help:channel', async (ctx) => {
