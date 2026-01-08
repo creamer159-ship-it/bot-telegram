@@ -42,6 +42,7 @@ const BOT_COMMANDS = [
   // Posty / zadania
   { command: 'list_posts', description: 'Lista zaplanowanych postów' },
   { command: 'list_jobs', description: 'Aktywne zadania cron' },
+  { command: 'stats', description: 'Podsumowanie zadań i prostych statystyk' },
 
   // Kanał
   { command: 'current_channel', description: 'Pokaż kanał' },
@@ -341,6 +342,71 @@ const truncateText = (text: string, max = 80) => {
     return text;
   }
   return `${text.slice(0, Math.max(0, max - 3))}...`;
+};
+
+const DOW_LABELS: Record<number, string> = {
+  0: 'nd',
+  1: 'pn',
+  2: 'wt',
+  3: 'śr',
+  4: 'czw',
+  5: 'pt',
+  6: 'sob',
+  7: 'nd',
+};
+
+const DOW_ORDER = ['pn', 'wt', 'śr', 'czw', 'pt', 'sob', 'nd'];
+
+const incrementCounter = (map: Map<string, number>, key: string) => {
+  map.set(key, (map.get(key) ?? 0) + 1);
+};
+
+const normalizeHourField = (value: string): string | null => {
+  const trimmed = value.trim();
+  if (!/^\d{1,2}$/.test(trimmed)) {
+    return null;
+  }
+  const parsed = Number(trimmed);
+  if (Number.isNaN(parsed) || parsed < 0 || parsed > 23) {
+    return null;
+  }
+  return parsed.toString().padStart(2, '0');
+};
+
+const getDowLabel = (value: string): string | null => {
+  const trimmed = value.trim();
+  if (!/^\d+$/.test(trimmed)) {
+    return null;
+  }
+  const parsed = Number(trimmed);
+  if (Number.isNaN(parsed)) {
+    return null;
+  }
+  return DOW_LABELS[parsed] ?? null;
+};
+
+const getNextRunFromJob = (job: ScheduledJob): Date | undefined => {
+  if (!job.job) {
+    return undefined;
+  }
+  try {
+    const nextDateTime = job.job.nextDate();
+    if (!nextDateTime) {
+      return undefined;
+    }
+    if (typeof nextDateTime.toJSDate === 'function') {
+      return nextDateTime.toJSDate();
+    }
+    if (typeof nextDateTime.toISO === 'function') {
+      const iso = nextDateTime.toISO();
+      if (typeof iso === 'string') {
+        return new Date(iso);
+      }
+    }
+  } catch (error) {
+    console.warn('Nie udało się odczytać następnego uruchomienia zadania.', error);
+  }
+  return undefined;
 };
 
 const describeJobContent = (type: JobContentType) => {
@@ -1008,6 +1074,7 @@ bot.command('help', async (ctx) => {
     zadania: [
       '/list_posts – lista postów',
       '/list_jobs – aktywne zadania',
+      '/stats – podsumowanie zadań i prostych statystyk',
       '/edit – edytuj istniejący post (użyj jako odpowiedzi na wiadomość)',
     ],
     kanal: ['/current_channel – pokaż kanał', '/set_channel – ustaw kanał'],
@@ -1132,6 +1199,7 @@ bot.action('help:jobs', async (ctx) => {
   const text =
     '✨ <b>Zarządzanie zadaniami CRON</b>\n\n' +
     '<b>/list_jobs</b> – pokazuje aktywne zadania (pod listą znajdziesz przyciski do zatrzymania lub usunięcia zadania).\n\n' +
+    '<b>/stats</b> – podsumowanie zadań, godzin i najbliższego uruchomienia.\n\n' +
     '<b>/list_posts</b> – lista zaplanowanych postów, przycisków ✏️/🗑 do edycji lub kasowania.';
   const keyboard = Markup.inlineKeyboard([
     [Markup.button.callback('🕒 Planowanie', 'help:plan')],
@@ -1513,6 +1581,140 @@ bot.command('list_jobs', async (ctx) => {
       },
     });
   }
+});
+
+bot.command('stats', async (ctx) => {
+  const userId = ctx.from?.id;
+  if (typeof userId !== 'number' || !configStore.isAdmin(userId)) {
+    await replyWithTracking(ctx, 'Ta komenda jest dostępna tylko dla adminów.', 'stats:not_admin');
+    return;
+  }
+
+  const allJobs = jobStore.getAllJobs();
+  if (allJobs.length === 0) {
+    await replyWithTracking(
+      ctx,
+      'Brak aktywnych zadań. Użyj /wizard albo /schedule, żeby coś zaplanować.',
+      'stats:empty',
+    );
+    return;
+  }
+
+  const currentChatId = ctx.chat?.id;
+  const defaultChannelId = getChannelId();
+  let currentChatJobs = 0;
+  let defaultChannelJobs = 0;
+  let otherJobs = 0;
+
+  const hourCounts = new Map<string, number>();
+  const dowCounts = new Map<string, number>();
+  const nextRunCandidates: Array<{ job: ScheduledJob; nextRun: Date | undefined }> = [];
+
+  for (const job of allJobs) {
+    if (typeof currentChatId === 'number' && job.targetChatId === currentChatId) {
+      currentChatJobs += 1;
+    } else if (defaultChannelId !== null && job.targetChatId === defaultChannelId) {
+      defaultChannelJobs += 1;
+    } else {
+      otherJobs += 1;
+    }
+
+    const cronParts = job.cronExpr.trim().split(/\s+/);
+    if (cronParts.length >= 6) {
+      const hourField = cronParts[2];
+      const dowField = cronParts[5];
+      if (typeof hourField === 'string') {
+        const hourKey = normalizeHourField(hourField);
+        if (hourKey) {
+          incrementCounter(hourCounts, hourKey);
+        }
+      }
+      if (typeof dowField === 'string') {
+        const dowLabel = getDowLabel(dowField);
+        if (dowLabel) {
+          incrementCounter(dowCounts, dowLabel);
+        }
+      }
+    }
+
+    nextRunCandidates.push({ job, nextRun: getNextRunFromJob(job) });
+  }
+
+  const upcomingJobs = nextRunCandidates
+    .filter(
+      (candidate): candidate is { job: ScheduledJob; nextRun: Date } =>
+        candidate.nextRun instanceof Date,
+    )
+    .sort((a, b) => a.nextRun.getTime() - b.nextRun.getTime());
+  const fallbackJob = allJobs[0]!;
+  const representativeJob: { job: ScheduledJob; nextRun?: Date } =
+    upcomingJobs.length > 0 ? upcomingJobs[0]! : { job: fallbackJob };
+  const nextRunLabel = representativeJob.nextRun
+    ? representativeJob.nextRun.toLocaleString('pl-PL', {
+        timeZone: 'Europe/Warsaw',
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+      })
+    : null;
+
+  const lines = [
+    '✨ Statystyki bota',
+    `• Aktywne zadania: ${allJobs.length}`,
+    `• Na ten czat: ${currentChatJobs}`,
+    `• Na kanał domyślny: ${defaultChannelJobs}`,
+    `• Na inne: ${otherJobs}`,
+    '',
+    '⏰ Rozkład godzin (HH: liczba jobów)',
+  ];
+  const hourEntries = Array.from(hourCounts.entries()).sort((a, b) => Number(a[0]) - Number(b[0]));
+  if (hourEntries.length === 0) {
+    lines.push('• brak danych');
+  } else {
+    for (const [hour, count] of hourEntries) {
+      lines.push(`• ${hour}: ${count}`);
+    }
+  }
+
+  lines.push('', '🗓 Rozkład dni tygodnia (jeśli da się odczytać z CRON)');
+  const dowEntries = Array.from(dowCounts.entries()).sort((a, b) => {
+    const indexA = DOW_ORDER.indexOf(a[0]);
+    const indexB = DOW_ORDER.indexOf(b[0]);
+    if (indexA === -1 && indexB === -1) {
+      return a[0].localeCompare(b[0]);
+    }
+    if (indexA === -1) {
+      return 1;
+    }
+    if (indexB === -1) {
+      return -1;
+    }
+    return indexA - indexB;
+  });
+  if (dowEntries.length === 0) {
+    lines.push('• brak danych');
+  } else {
+    for (const [label, count] of dowEntries) {
+      lines.push(`• ${label}: ${count}`);
+    }
+  }
+
+  lines.push('', 'Najbliższe zadanie:');
+  lines.push(`• chatId: ${representativeJob.job.targetChatId}`);
+  lines.push(`• cron: ${representativeJob.job.cronExpr}`);
+  if (nextRunLabel) {
+    lines.push(`• następne uruchomienie: ${nextRunLabel}`);
+  }
+  const jobText = representativeJob.job.text?.trim();
+  if (jobText) {
+    lines.push(`• opis: ${truncateText(jobText, 70)}`);
+  } else {
+    lines.push(`• typ: ${describeJobContent(representativeJob.job.contentType)}`);
+  }
+
+  await replyWithTracking(ctx, lines.join('\n'), 'stats:report');
 });
 
 // /schedule "*/10 * * * * *" Hello co 10s
